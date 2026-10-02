@@ -5,12 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "server": "node server/index.js",
-    "dev:server": "node --watch server/index.js",
+    "dev:next": "next dev -p 3000",
+    "server": "node server/express.js",
+    "dev:server": "node --watch server/express.js",
     "build": "tsc -b && vite build",
+    "build:next": "next build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "start": "node server/index.js"
+    "start": "node server/express.js",
+    "start:next": "next start -p 3000"
   },
   "dependencies": {
     "bcryptjs": "^3.0.0",
@@ -20,6 +23,7 @@
     "geoip-lite": "^1.4.10",
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.468.0",
+    "next": "^16.0.0",
     "mongoose": "^8.9.2",
     "qrcode": "^1.0.0",
     "recharts": "^2.15.0",

@@ -9,7 +9,7 @@
   width: 220px;
   background: linear-gradient(180deg, #101827 0%, #161d2f 100%);
   color: #f7f9fc;
-  padding: 14px px;
+  padding: 17px px;
   display: flex;
   flex-direction: column;
   gap: 28px;
@@ -1024,6 +1024,29 @@ tr.selected {
   gap: 18px;
 }
 
+.campaign-create-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.campaign-create-form label {
+  display: grid;
+  gap: 7px;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.campaign-create-form input {
+  width: min(360px, 70vw);
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font: inherit;
+}
+
 .campaign-card {
   padding: 20px;
   border: 1px solid #edf0f5;
@@ -1038,6 +1061,12 @@ tr.selected {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.campaign-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .campaign-icon {
@@ -1279,6 +1308,15 @@ tr.selected {
 
   .inline-fields {
     grid-template-columns: 1fr;
+  }
+
+  .campaign-create-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .campaign-create-form input {
+    width: 100%;
   }
 
   .landing-hero,
@@ -1563,7 +1601,7 @@ html.dark-mode body {
 .sidebar {
   background: #ffffff !important;
   background-image: none !important;
-  border-right: 1px solid #e2e8f0 !important;
+  border-right: 11px solid #e2e8f0 !important;
 }
 
 .sidebar button,

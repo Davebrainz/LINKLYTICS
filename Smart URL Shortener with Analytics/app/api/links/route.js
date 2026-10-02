@@ -1,0 +1,1 @@
+export { listLinks as GET, createLink as POST } from '../../../server/index.js'

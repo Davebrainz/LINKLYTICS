@@ -1,0 +1,1 @@
+export { analytics as GET } from '../../../server/index.js'

@@ -1,27 +1,21 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import QRCode from 'qrcode';
 import geoip from 'geoip-lite';
 import bcrypt from 'bcryptjs';
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
-dotenv.config();
-
-const app = express();
-const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'linklytics_secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/linklytics';
 
-const inMemoryUsers = [];
-const inMemoryLinks = [];
-const inMemoryClicks = [];
-let mongoReady = false;
-
-app.use(cors());
-app.use(express.json({ extended: true }));
+const state = globalThis.linklyticsState || {
+  users: [],
+  links: [],
+  clicks: [],
+  mongoReady: false,
+  connection: null,
+};
+globalThis.linklyticsState = state;
 
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -61,512 +55,297 @@ const User = mongoose.models.User || mongoose.model('User', userSchema);
 const Click = mongoose.models.Click || mongoose.model('Click', clickSchema);
 const Link = mongoose.models.Link || mongoose.model('Link', linkSchema);
 
-const generateToken = (user) => jwt.sign({ userId: user._id || user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+const json = (data, status = 200) => Response.json(data, { status });
+const errorMessage = (error) => error instanceof Error ? error.message : 'Unexpected error';
+const getMemoryUserById = (id) => state.users.find((user) => user.id === id);
+const getMemoryUserByEmail = (email) => state.users.find((user) => user.email.toLowerCase() === email.toLowerCase());
 
-const generateShortCode = () => `${Math.random().toString(36).slice(2, 8).toUpperCase()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+async function connectDatabase() {
+  if (!state.connection) {
+    state.connection = mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 5000 })
+      .then(async () => {
+        state.mongoReady = true;
+        if (!await User.exists({ email: 'demo@linklytics.com' })) {
+          await User.create({
+            name: 'Demo User',
+            email: 'demo@linklytics.com',
+            password: await bcrypt.hash('123456', 10),
+          });
+        }
+      })
+      .catch(async () => {
+        state.mongoReady = false;
+        if (!getMemoryUserByEmail('demo@linklytics.com')) {
+          state.users.push({
+            id: 'demo-user-1',
+            name: 'Demo User',
+            email: 'demo@linklytics.com',
+            password: await bcrypt.hash('123456', 10),
+          });
+        }
+      });
+  }
+  await state.connection;
+}
 
-const parseUserAgent = (userAgent = '') => {
+function generateToken(user) {
+  return jwt.sign({ userId: user._id || user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+}
+
+function generateShortCode() {
+  return `${Math.random().toString(36).slice(2, 8).toUpperCase()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+}
+
+function parseUserAgent(userAgent = '') {
   const ua = userAgent.toLowerCase();
   let browser = 'Unknown';
   let device = 'Desktop';
   let os = 'Unknown';
-
   if (ua.includes('chrome') && !ua.includes('edg')) browser = 'Chrome';
   else if (ua.includes('firefox')) browser = 'Firefox';
   else if (ua.includes('safari')) browser = 'Safari';
   else if (ua.includes('edg')) browser = 'Edge';
-
   if (/android/.test(ua)) os = 'Android';
   else if (/iphone|ipad|ipod/.test(ua)) os = 'iOS';
   else if (/windows/.test(ua)) os = 'Windows';
   else if (/mac os/.test(ua)) os = 'macOS';
-
   if (/mobile|android|iphone/.test(ua)) device = 'Mobile';
   else if (/ipad|tablet/.test(ua)) device = 'Tablet';
-
   return { browser, device, os };
-};
+}
 
-const normalizeLinkDocument = (link) => ({
-  id: link._id ? String(link._id) : link.id,
-  title: link.title,
-  longUrl: link.longUrl,
-  shortCode: link.shortCode,
-  shortUrl: link.shortUrl,
-  customSlug: link.customSlug,
-  expiresAt: link.expiresAt,
-  maxClicks: link.maxClicks,
-  clickCount: link.clickCount || 0,
-  status: link.status || 'Active',
-  clickEvents: link.clickEvents || [],
-  qrCode: link.qrCode,
-  createdAt: link.createdAt,
-});
+function formatLink(link, clickList = []) {
+  return {
+    id: link._id ? String(link._id) : link.id,
+    title: link.title,
+    longUrl: link.longUrl,
+    shortCode: link.shortCode,
+    shortUrl: link.shortUrl,
+    customSlug: link.customSlug,
+    expiresAt: link.expiresAt,
+    maxClicks: link.maxClicks,
+    clickCount: clickList.length || link.clickCount || 0,
+    status: link.status || 'Active',
+    clickEvents: clickList.map((event) => ({
+      id: event._id ? String(event._id) : event.id,
+      country: event.country || 'Unknown',
+      city: event.city || 'Unknown',
+      device: event.device || 'Desktop',
+      browser: event.browser || 'Unknown',
+      os: event.os || 'Unknown',
+      referrer: event.referrer || 'Direct',
+      createdAt: event.timestamp || event.createdAt,
+    })),
+    qrCode: link.qrCode,
+    createdAt: link.createdAt,
+  };
+}
 
-const getMemoryUserById = (userId) => inMemoryUsers.find((user) => user.id === userId);
-const getMemoryUserByEmail = (email) => inMemoryUsers.find((user) => user.email.toLowerCase() === email.toLowerCase());
-
-const seedMemoryDemoUser = async () => {
-  const demoPassword = await bcrypt.hash('123456', 10);
-  if (!getMemoryUserByEmail('demo@linklytics.com')) {
-    inMemoryUsers.push({
-      id: 'demo-user-1',
-      name: 'Demo User',
-      email: 'demo@linklytics.com',
-      password: demoPassword,
-    });
-  }
-};
-
-const seedMongoDemoUser = async () => {
-  const existing = await User.findOne({ email: 'demo@linklytics.com' });
-  if (!existing) {
-    const password = await bcrypt.hash('123456', 10);
-    await User.create({
-      name: 'Demo User',
-      email: 'demo@linklytics.com',
-      password,
-    });
-  }
-};
-
-const connectDatabase = async () => {
-  try {
-    await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 5000 });
-    mongoReady = true;
-    console.log('MongoDB connected');
-    await seedMongoDemoUser();
-  } catch (error) {
-    mongoReady = false;
-    console.log('MongoDB unavailable — using in-memory storage for this demo.');
-    await seedMemoryDemoUser();
-  }
-};
-
-const getUserByToken = async (token) => {
+async function getUser(request) {
+  await connectDatabase();
+  const authorization = request.headers.get('authorization') || '';
+  const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : null;
   if (!token) return null;
-
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-
-    if (mongoReady) {
-      const user = await User.findById(decoded.userId);
-      return user;
-    }
-
-    return getMemoryUserById(decoded.userId) || null;
+    return state.mongoReady ? await User.findById(decoded.userId) : getMemoryUserById(decoded.userId) || null;
   } catch {
     return null;
   }
-};
+}
 
-const getAuthUser = async (req, res, next) => {
-  try {
-    const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.split(' ')[1] : null;
+async function authorizedUser(request) {
+  const user = await getUser(request);
+  return user ? { user } : { response: json({ message: 'User not found or token invalid' }, 401) };
+}
 
-    if (!token) {
-      return res.status(401).json({ message: 'No token provided' });
-    }
-
-    const user = await getUserByToken(token);
-    if (!user) {
-      return res.status(401).json({ message: 'User not found or token invalid' });
-    }
-
-    req.user = user;
-    next();
-  } catch (error) {
-    return res.status(401).json({ message: 'Invalid token' });
-  }
-};
-
-const formatLinkForClient = (link, clickList = []) => ({
-  id: link._id ? String(link._id) : link.id,
-  title: link.title,
-  longUrl: link.longUrl,
-  shortCode: link.shortCode,
-  shortUrl: link.shortUrl,
-  customSlug: link.customSlug,
-  expiresAt: link.expiresAt,
-  maxClicks: link.maxClicks,
-  clickCount: clickList.length || link.clickCount || 0,
-  status: link.status || 'Active',
-  clickEvents: clickList.map((event) => ({
-    id: event._id ? String(event._id) : event.id,
-    country: event.country || 'Unknown',
-    city: event.city || 'Unknown',
-    device: event.device || 'Desktop',
-    browser: event.browser || 'Unknown',
-    os: event.os || 'Unknown',
-    referrer: event.referrer || 'Direct',
-    createdAt: event.timestamp || event.createdAt,
-  })),
-  qrCode: link.qrCode,
-  createdAt: link.createdAt,
-});
-
-const getUserLinks = async (userId) => {
-  if (mongoReady) {
+async function getUserLinks(userId) {
+  if (state.mongoReady) {
     const links = await Link.find({ userId }).sort({ createdAt: -1 });
-    const formatted = [];
-
-    for (const link of links) {
-      const clickEvents = await Click.find({ linkId: link._id }).sort({ timestamp: -1 }).lean();
-      formatted.push(formatLinkForClient(link, clickEvents));
-    }
-
-    return formatted;
+    return Promise.all(links.map(async (link) => {
+      const clicks = await Click.find({ linkId: link._id }).sort({ timestamp: -1 }).lean();
+      return formatLink(link, clicks);
+    }));
   }
+  return state.links.filter((link) => link.userId === userId).map((link) =>
+    formatLink(link, state.clicks.filter((click) => click.linkId === link.id)));
+}
 
-  return inMemoryLinks
-    .filter((link) => link.userId === userId)
-    .map((link) => ({
-      ...link,
-      clickEvents: inMemoryClicks.filter((event) => event.linkId === link.id),
-    }))
-    .map((link) => formatLinkForClient(link, link.clickEvents));
-};
+export async function health() {
+  return json({ status: 'ok', message: 'Linklytics backend is running' });
+}
 
-const findLinkBySlug = async (slug) => {
-  const normalizedSlug = slug.toLowerCase();
-
-  if (mongoReady) {
-    return Link.findOne({ $or: [{ shortCode: slug.toUpperCase() }, { customSlug: normalizedSlug }] });
-  }
-
-  return inMemoryLinks.find((link) =>
-    link.customSlug === normalizedSlug || link.shortCode.toLowerCase() === normalizedSlug,
-  );
-};
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Linklytics backend is running' });
-});
-
-app.post('/api/auth/register', async (req, res) => {
+export async function register(request) {
   try {
-    const { name, email, password } = req.body;
-
-    if (!name || !email || !password) {
-      return res.status(400).json({ message: 'All fields are required' });
+    await connectDatabase();
+    const { name, email, password } = await request.json();
+    if (!name || !email || !password) return json({ message: 'All fields are required' }, 400);
+    if (state.mongoReady) {
+      if (await User.exists({ email })) return json({ message: 'User already exists' }, 400);
+      const user = await User.create({ name, email, password: await bcrypt.hash(password, 10) });
+      return json({ message: 'User registered', token: generateToken(user), user: { id: String(user._id), name, email } }, 201);
     }
-
-    if (mongoReady) {
-      const existingUser = await User.findOne({ email });
-      if (existingUser) {
-        return res.status(400).json({ message: 'User already exists' });
-      }
-
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const user = await User.create({ name, email, password: hashedPassword });
-      return res.status(201).json({ message: 'User registered', token: generateToken(user), user: { id: user._id, name: user.name, email: user.email } });
-    }
-
-    const existingUser = getMemoryUserByEmail(email);
-    if (existingUser) {
-      return res.status(400).json({ message: 'User already exists' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = { id: randomUUID(), name, email, password: hashedPassword };
-    inMemoryUsers.push(user);
-    return res.status(201).json({ message: 'User registered', token: generateToken(user), user: { id: user.id, name: user.name, email: user.email } });
+    if (getMemoryUserByEmail(email)) return json({ message: 'User already exists' }, 400);
+    const user = { id: randomUUID(), name, email, password: await bcrypt.hash(password, 10) };
+    state.users.push(user);
+    return json({ message: 'User registered', token: generateToken(user), user: { id: user.id, name, email } }, 201);
   } catch (error) {
-    return res.status(500).json({ message: 'Registration failed', error: error.message });
+    return json({ message: 'Registration failed', error: errorMessage(error) }, 500);
   }
-});
+}
 
-app.post('/api/auth/login', async (req, res) => {
+export async function login(request) {
   try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password are required' });
-    }
-
-    if (mongoReady) {
-      const user = await User.findOne({ email });
-      if (!user) {
-        return res.status(401).json({ message: 'Invalid email or password' });
-      }
-
-      const isValid = await bcrypt.compare(password, user.password);
-      if (!isValid) {
-        return res.status(401).json({ message: 'Invalid email or password' });
-      }
-
-      return res.json({ message: 'Login successful', token: generateToken(user), user: { id: user._id, name: user.name, email: user.email } });
-    }
-
-    const user = getMemoryUserByEmail(email);
-    if (!user) {
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
-
-    const isValid = await bcrypt.compare(password, user.password);
-    if (!isValid) {
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
-
-    return res.json({ message: 'Login successful', token: generateToken(user), user: { id: user.id, name: user.name, email: user.email } });
+    await connectDatabase();
+    const { email, password } = await request.json();
+    if (!email || !password) return json({ message: 'Email and password are required' }, 400);
+    const user = state.mongoReady ? await User.findOne({ email }) : getMemoryUserByEmail(email);
+    if (!user || !await bcrypt.compare(password, user.password)) return json({ message: 'Invalid email or password' }, 401);
+    return json({ message: 'Login successful', token: generateToken(user), user: { id: String(user._id || user.id), name: user.name, email: user.email } });
   } catch (error) {
-    return res.status(500).json({ message: 'Login failed', error: error.message });
+    return json({ message: 'Login failed', error: errorMessage(error) }, 500);
   }
-});
+}
 
-app.post('/api/links', getAuthUser, async (req, res) => {
+export async function listLinks(request) {
   try {
-    const { longUrl, customSlug, expiresAt, maxClicks, title } = req.body;
+    const auth = await authorizedUser(request);
+    if (auth.response) return auth.response;
+    return json(await getUserLinks(String(auth.user._id || auth.user.id)));
+  } catch (error) {
+    return json({ message: 'Failed to fetch links', error: errorMessage(error) }, 500);
+  }
+}
 
-    if (!longUrl) {
-      return res.status(400).json({ message: 'longUrl is required' });
-    }
-
+export async function createLink(request) {
+  try {
+    const auth = await authorizedUser(request);
+    if (auth.response) return auth.response;
+    const { longUrl, customSlug, expiresAt, maxClicks, title } = await request.json();
+    if (!longUrl) return json({ message: 'longUrl is required' }, 400);
     const normalizedUrl = /^https?:\/\//i.test(longUrl) ? longUrl : `https://${longUrl}`;
-    const slugValue = (customSlug || generateShortCode()).trim();
-    const finalSlug = slugValue.replace(/\s+/g, '-');
-    const shortCode = finalSlug.toUpperCase();
-    const shortUrl = `http://localhost:5000/${finalSlug.toLowerCase()}`;
-
-    if (mongoReady) {
-      const existing = await Link.findOne({ $or: [{ shortCode }, { customSlug: finalSlug.toLowerCase() }, { shortUrl }] });
-      if (existing) {
-        return res.status(400).json({ message: 'This slug is already in use. Choose another one.' });
-      }
-
-      const qrCode = await QRCode.toDataURL(shortUrl);
-      const link = await Link.create({
-        userId: req.user._id,
-        title: title || 'Campaign Link',
-        longUrl: normalizedUrl,
-        shortCode,
-        customSlug: finalSlug.toLowerCase(),
-        shortUrl,
-        expiresAt: expiresAt ? new Date(expiresAt) : undefined,
-        maxClicks: maxClicks ? Number(maxClicks) : undefined,
-        clickCount: 0,
-        status: 'Active',
-        qrCode,
-        clickEvents: [],
-      });
-
-      return res.status(201).json(formatLinkForClient(link, []));
-    }
-
-    const duplicate = inMemoryLinks.find((link) =>
-      link.shortCode.toLowerCase() === finalSlug.toLowerCase() ||
-      link.customSlug === finalSlug.toLowerCase() ||
-      link.shortUrl === shortUrl,
-    );
-
-    if (duplicate) {
-      return res.status(400).json({ message: 'This slug is already in use. Choose another one.' });
-    }
-
+    const slug = (customSlug || generateShortCode()).trim().replace(/\s+/g, '-').toLowerCase();
+    const shortCode = slug.toUpperCase();
+    const shortUrl = `${new URL(request.url).origin}/${slug}`;
+    const duplicate = state.mongoReady
+      ? await Link.findOne({ $or: [{ shortCode }, { customSlug: slug }, { shortUrl }] })
+      : state.links.find((link) => link.shortCode.toLowerCase() === slug || link.customSlug === slug || link.shortUrl === shortUrl);
+    if (duplicate) return json({ message: 'This slug is already in use. Choose another one.' }, 400);
     const qrCode = await QRCode.toDataURL(shortUrl);
-    const link = {
-      id: randomUUID(),
-      userId: req.user.id,
-      title: title || 'Campaign Link',
-      longUrl: normalizedUrl,
-      shortCode,
-      customSlug: finalSlug.toLowerCase(),
-      shortUrl,
-      expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined,
+    const values = {
+      title: title || 'Campaign Link', longUrl: normalizedUrl, shortCode, customSlug: slug, shortUrl,
+      expiresAt: expiresAt ? new Date(expiresAt) : undefined,
       maxClicks: maxClicks ? Number(maxClicks) : undefined,
-      clickCount: 0,
-      status: 'Active',
-      qrCode,
-      clickEvents: [],
-      createdAt: new Date().toISOString(),
+      clickCount: 0, status: 'Active', qrCode, clickEvents: [],
     };
-
-    inMemoryLinks.unshift(link);
-    return res.status(201).json(formatLinkForClient(link, []));
+    if (state.mongoReady) {
+      const link = await Link.create({ ...values, userId: auth.user._id });
+      return json(formatLink(link), 201);
+    }
+    const link = { ...values, id: randomUUID(), userId: auth.user.id, createdAt: new Date().toISOString() };
+    state.links.unshift(link);
+    return json(formatLink(link), 201);
   } catch (error) {
-    return res.status(500).json({ message: 'Failed to create short link', error: error.message });
+    return json({ message: 'Failed to create short link', error: errorMessage(error) }, 500);
   }
-});
+}
 
-app.get('/api/links', getAuthUser, async (req, res) => {
+export async function analytics(request) {
   try {
-    const userId = mongoReady ? req.user._id.toString() : req.user.id;
-    const links = await getUserLinks(userId);
-    return res.json(links);
-  } catch (error) {
-    return res.status(500).json({ message: 'Failed to fetch links', error: error.message });
-  }
-});
-
-app.get('/api/analytics', getAuthUser, async (req, res) => {
-  try {
-    const userId = mongoReady ? req.user._id.toString() : req.user.id;
-    const links = await getUserLinks(userId);
+    const auth = await authorizedUser(request);
+    if (auth.response) return auth.response;
+    const links = await getUserLinks(String(auth.user._id || auth.user.id));
     const referrers = new Map();
     const daily = new Map();
-
     links.forEach((link) => link.clickEvents.forEach((event) => {
       const source = event.referrer || 'Direct';
       referrers.set(source, (referrers.get(source) || 0) + 1);
       const date = new Date(event.createdAt).toISOString().slice(0, 10);
       daily.set(date, (daily.get(date) || 0) + 1);
     }));
-
-    return res.json({
+    return json({
       referrers: Array.from(referrers, ([source, clicks]) => ({ source, clicks })),
       daily: Array.from(daily, ([date, clicks]) => ({ date, clicks })),
     });
   } catch (error) {
-    return res.status(500).json({ message: 'Failed to fetch analytics', error: error.message });
+    return json({ message: 'Failed to fetch analytics', error: errorMessage(error) }, 500);
   }
-});
+}
 
-app.get('/:slug', async (req, res) => {
+export async function trackClick(request, { params }) {
   try {
-    const { slug } = req.params;
-    const link = await findLinkBySlug(slug);
-
-    if (!link) {
-      return res.status(404).json({ message: 'Short link not found' });
+    const auth = await authorizedUser(request);
+    if (auth.response) return auth.response;
+    const { id } = await params;
+    const link = state.mongoReady ? await Link.findById(id) : state.links.find((item) => item.id === id);
+    if (!link || String(link.userId) !== String(auth.user._id || auth.user.id)) return json({ message: 'Link not found' }, 404);
+    if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
+      link.status = 'Expired';
+      if (state.mongoReady) await link.save();
+      return json({ message: 'This link has expired', link: { id, status: 'Expired' } }, 400);
     }
-
-    const now = new Date();
-    if (link.expiresAt && new Date(link.expiresAt) < now) {
-      return res.status(410).json({ message: 'This link has expired' });
-    }
-
     if (link.maxClicks && link.clickCount >= link.maxClicks) {
-      return res.status(410).json({ message: 'Click limit reached' });
+      link.status = 'Limit Reached';
+      if (state.mongoReady) await link.save();
+      return json({ message: 'Click limit reached', link: { id, status: 'Limit Reached' } }, 400);
     }
-
-    const ipAddress = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
-    const geo = geoip.lookup(Array.isArray(ipAddress) ? ipAddress[0].replace('::ffff:', '') : ipAddress.replace('::ffff:', '')) || {};
-    const ua = parseUserAgent(req.headers['user-agent']);
-    const referrer = req.headers.referer || req.headers.referrer || 'Direct';
-
-    if (mongoReady) {
-      const click = await Click.create({
-        linkId: link._id,
-        country: geo.country || 'Unknown',
-        city: geo.city || 'Unknown',
-        device: ua.device,
-        browser: ua.browser,
-        os: ua.os,
-        referrer,
-        ipAddress,
-        timestamp: new Date(),
-      });
-
-      link.clickCount += 1;
-      link.clickEvents.push(click._id);
-      if (link.maxClicks && link.clickCount >= link.maxClicks) {
-        link.status = 'Limit Reached';
-      }
-      await link.save();
-      return res.redirect(link.longUrl);
-    }
-
-    const clickEvent = {
-      id: randomUUID(),
-      linkId: link.id,
-      country: geo.country || 'Nigeria',
-      city: geo.city || 'Lagos',
-      device: ua.device,
-      browser: ua.browser,
-      os: ua.os,
-      referrer,
-      ipAddress,
-      timestamp: new Date().toISOString(),
-    };
-
-    inMemoryClicks.unshift(clickEvent);
-    link.clickCount = (link.clickCount || 0) + 1;
-    link.status = link.maxClicks && link.clickCount >= link.maxClicks ? 'Limit Reached' : 'Active';
-    return res.redirect(link.longUrl);
-  } catch (error) {
-    return res.status(500).json({ message: 'Redirect failed', error: error.message });
-  }
-});
-
-app.post('/api/links/:id/click', getAuthUser, async (req, res) => {
-  try {
-    if (mongoReady) {
-      const link = await Link.findById(req.params.id);
-      if (!link) {
-        return res.status(404).json({ message: 'Link not found' });
-      }
-
-      const now = new Date();
-      if (link.expiresAt && now > new Date(link.expiresAt)) {
-        link.status = 'Expired';
-        await link.save();
-        return res.status(400).json({ message: 'This link has expired', link: { id: link._id, status: 'Expired' } });
-      }
-
-      if (link.maxClicks && link.clickCount >= link.maxClicks) {
-        link.status = 'Limit Reached';
-        await link.save();
-        return res.status(400).json({ message: 'Click limit reached', link: { id: link._id, status: 'Limit Reached' } });
-      }
-
-      const ua = parseUserAgent(req.headers['user-agent']);
-      const click = await Click.create({
-        linkId: link._id,
-        country: 'Nigeria',
-        city: 'Lagos',
-        device: ua.device,
-        browser: ua.browser,
-        os: ua.os,
-        timestamp: new Date(),
-      });
-
+    const agent = parseUserAgent(request.headers.get('user-agent') || '');
+    let clicks;
+    if (state.mongoReady) {
+      const click = await Click.create({ linkId: link._id, country: 'Nigeria', city: 'Lagos', ...agent });
       link.clickCount += 1;
       link.clickEvents.push(click._id);
       link.status = link.maxClicks && link.clickCount >= link.maxClicks ? 'Limit Reached' : 'Active';
       await link.save();
-
-      const updatedClicks = await Click.find({ linkId: link._id }).sort({ timestamp: -1 }).lean();
-      return res.json({ message: 'Click tracked successfully', link: formatLinkForClient(link, updatedClicks) });
+      clicks = await Click.find({ linkId: link._id }).sort({ timestamp: -1 }).lean();
+    } else {
+      state.clicks.unshift({ id: randomUUID(), linkId: link.id, country: 'Nigeria', city: 'Lagos', ...agent, timestamp: new Date().toISOString() });
+      link.clickCount += 1;
+      link.status = link.maxClicks && link.clickCount >= link.maxClicks ? 'Limit Reached' : 'Active';
+      clicks = state.clicks.filter((event) => event.linkId === link.id);
     }
-
-    const link = inMemoryLinks.find((item) => item.id === req.params.id);
-    if (!link) return res.status(404).json({ message: 'Link not found' });
-
-    if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
-      link.status = 'Expired';
-      return res.status(400).json({ message: 'This link has expired', link: { id: link.id, status: 'Expired' } });
-    }
-
-    if (link.maxClicks && link.clickCount >= link.maxClicks) {
-      link.status = 'Limit Reached';
-      return res.status(400).json({ message: 'Click limit reached', link: { id: link.id, status: 'Limit Reached' } });
-    }
-
-    const ua = parseUserAgent(req.headers['user-agent']);
-    const clickEvent = {
-      id: randomUUID(),
-      linkId: link.id,
-      country: 'Nigeria',
-      city: 'Lagos',
-      device: ua.device,
-      browser: ua.browser,
-      os: ua.os,
-      timestamp: new Date().toISOString(),
-    };
-
-    inMemoryClicks.unshift(clickEvent);
-    link.clickCount = (link.clickCount || 0) + 1;
-    link.status = link.maxClicks && link.clickCount >= link.maxClicks ? 'Limit Reached' : 'Active';
-
-    return res.json({ message: 'Click tracked successfully', link: formatLinkForClient(link, inMemoryClicks.filter((event) => event.linkId === link.id)) });
+    return json({ message: 'Click tracked successfully', link: formatLink(link, clicks) });
   } catch (error) {
-    return res.status(500).json({ message: 'Failed to track click', error: error.message });
+    return json({ message: 'Failed to track click', error: errorMessage(error) }, 500);
   }
-});
+}
 
-connectDatabase();
+export async function redirectShortLink(request, { params }) {
+  try {
+    const purpose = `${request.headers.get('purpose') || ''} ${request.headers.get('sec-purpose') || ''}`;
+    if (/\b(prefetch|prerender)\b/i.test(purpose) || request.headers.has('next-router-prefetch')) {
+      return new Response(null, { status: 204 });
+    }
 
-app.listen(PORT, () => {
-  console.log(`Linklytics server running on http://localhost:${PORT}`);
-});
+    await connectDatabase();
+    const { slug } = await params;
+    const link = state.mongoReady
+      ? await Link.findOne({ $or: [{ shortCode: slug.toUpperCase() }, { customSlug: slug.toLowerCase() }] })
+      : state.links.find((item) => item.customSlug === slug.toLowerCase() || item.shortCode.toLowerCase() === slug.toLowerCase());
+    if (!link) return json({ message: 'Short link not found' }, 404);
+    if (link.expiresAt && new Date(link.expiresAt) < new Date()) return json({ message: 'This link has expired' }, 410);
+    if (link.maxClicks && link.clickCount >= link.maxClicks) return json({ message: 'Click limit reached' }, 410);
+    const address = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '127.0.0.1';
+    const geo = geoip.lookup(address.replace('::ffff:', '')) || {};
+    const agent = parseUserAgent(request.headers.get('user-agent') || '');
+    const click = {
+      linkId: link._id || link.id, country: geo.country || 'Unknown', city: geo.city || 'Unknown', ...agent,
+      referrer: request.headers.get('referer') || 'Direct', ipAddress: address, timestamp: new Date(),
+    };
+    if (state.mongoReady) {
+      const savedClick = await Click.create(click);
+      link.clickCount += 1;
+      link.clickEvents.push(savedClick._id);
+      if (link.maxClicks && link.clickCount >= link.maxClicks) link.status = 'Limit Reached';
+      await link.save();
+    } else {
+      state.clicks.unshift({ ...click, id: randomUUID(), timestamp: click.timestamp.toISOString() });
+      link.clickCount = (link.clickCount || 0) + 1;
+      link.status = link.maxClicks && link.clickCount >= link.maxClicks ? 'Limit Reached' : 'Active';
+    }
+    return Response.redirect(link.longUrl, 307);
+  } catch (error) {
+    return json({ message: 'Redirect failed', error: errorMessage(error) }, 500);
+  }
+}
+

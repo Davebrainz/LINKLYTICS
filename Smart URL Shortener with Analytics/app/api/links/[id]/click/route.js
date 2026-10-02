@@ -1,0 +1,1 @@
+export { trackClick as POST } from '../../../../../server/index.js'

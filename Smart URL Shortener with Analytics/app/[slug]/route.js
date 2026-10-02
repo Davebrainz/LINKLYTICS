@@ -1,0 +1,1 @@
+export { redirectShortLink as GET } from '../../server/index.js'

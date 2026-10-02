@@ -6,7 +6,7 @@ import Header from './components/Header'
 import Logo from './components/Logo'
 import { detectGender, getGenderedAvatar } from './utils/gender'
 
-const API_BASE = 'http://localhost:5000/api'
+const API_BASE = '/api'
 
 type ClickEvent = {
   id: string
@@ -98,11 +98,29 @@ function App() {
   const [linkSearch, setLinkSearch] = useState('')
   const [linkFilter, setLinkFilter] = useState<'All' | 'Active' | 'Expired'>('All')
   const [expandedCampaign, setExpandedCampaign] = useState<string | null>(null)
+  const [hiddenCampaigns, setHiddenCampaigns] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('linklytics-hidden-campaigns') || '[]')
+      return Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []
+    } catch {
+      return []
+    }
+  })
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [copied, setCopied] = useState(false)
   const [qrLink, setQrLink] = useState<string | null>(null)
   const [analyticsData, setAnalyticsData] = useState<AnalyticsData>({ referrers: [], daily: [] })
-  const [customCampaigns, setCustomCampaigns] = useState<{ id: string; name: string; color: string }[]>([])
+  const [customCampaigns, setCustomCampaigns] = useState<{ id: string; name: string; color: string }[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('linklytics-campaigns') || '[]')
+      return Array.isArray(saved) ? saved.filter((campaign): campaign is { id: string; name: string; color: string } =>
+        campaign && typeof campaign.id === 'string' && typeof campaign.name === 'string' && typeof campaign.color === 'string') : []
+    } catch {
+      return []
+    }
+  })
+  const [campaignName, setCampaignName] = useState('')
+  const [isCreatingCampaign, setIsCreatingCampaign] = useState(false)
   const [settingsTab, setSettingsTab] = useState<'Profile' | 'Branding' | 'Preferences'>('Profile')
   const [settings, setSettings] = useState(() => ({ domain: localStorage.getItem('linklytics-domain') || 'short.ly/', theme: localStorage.getItem('linklytics-brand-color') || '#4f46e5', expiry: localStorage.getItem('linklytics-expiry') || '30 days', maxClicks: localStorage.getItem('linklytics-max-clicks') || 'Unlimited', emailAlerts: localStorage.getItem('linklytics-email-alerts')!== 'false' }))
   const [profile, setProfile] = useState(() => ({
@@ -216,6 +234,14 @@ function App() {
   }, [isDarkMode])
 
   useEffect(() => {
+    localStorage.setItem('linklytics-hidden-campaigns', JSON.stringify(hiddenCampaigns))
+  }, [hiddenCampaigns])
+
+  useEffect(() => {
+    localStorage.setItem('linklytics-campaigns', JSON.stringify(customCampaigns))
+  }, [customCampaigns])
+
+  useEffect(() => {
     document.documentElement.style.setProperty('--brand-color', settings.theme)
     localStorage.setItem('linklytics-domain', settings.domain)
     localStorage.setItem('linklytics-brand-color', settings.theme)
@@ -223,13 +249,6 @@ function App() {
     localStorage.setItem('linklytics-max-clicks', settings.maxClicks)
     localStorage.setItem('linklytics-email-alerts', String(settings.emailAlerts))
   }, [settings])
-
-  useEffect(() => {
-    if (notice?.text === 'Campaign creation is ready for your next launch.') {
-      setCustomCampaigns((current) => current.some((campaign) => campaign.name === 'New Campaign')? current : [...current, { id: `custom-${Date.now()}`, name: 'New Campaign', color: settings.theme }])
-      setNotice({ type: 'success', text: 'Campaign created successfully.' })
-    }
-  }, [notice, settings.theme])
 
   const openAuth = (mode: 'login' | 'register' = 'login') => {
     setAuthMode(mode)
@@ -324,25 +343,22 @@ function App() {
     setForm({ longUrl: '', customSlug: '', expiresAt: '', maxClicks: '' })
   }
 
-  const simulateClick = async (linkId: string) => {
-    if (!token) return
+  const createCampaign = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const name = campaignName.trim()
+    if (!name) return
+    setCustomCampaigns((current) => [...current, {
+      id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      color: settings.theme,
+    }])
+    setCampaignName('')
+    setIsCreatingCampaign(false)
+    setNotice({ type: 'success', text: 'Campaign created successfully.' })
+  }
 
-    const response = await fetch(`${API_BASE}/links/${linkId}/click`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    })
-
-    const result = await response.json()
-
-    if (!response.ok) {
-      setNotice({ type: 'error', text: result.message || 'Unable to track this click.' })
-      return
-    }
-
-    setLinks((current) => current.map((link) => (link.id === linkId? result.link : link)))
-    setNotice({ type: 'success', text: result.message || 'Click tracked successfully.' })
+  const openShortLink = (shortUrl: string) => {
+    window.open(shortUrl, '_blank', 'noopener,noreferrer')
   }
 
   const maxTraffic = Math.max(...dailyTraffic.map((point) => point.value), 1)
@@ -368,7 +384,13 @@ function App() {
     { id: 'product-launch', name: 'Product Launch', color: '#4f46e5', links: links.filter((link) => /product|launch/i.test(`${link.title} ${link.longUrl}`)) },
     { id: 'always-on', name: 'Always-on Content', color: '#0d9488', links: links.filter((link) =>!/black|sale|product|launch/i.test(`${link.title} ${link.longUrl}`)) },
    ...customCampaigns.map((campaign) => ({...campaign, links: [] as UrlLink[] })),
-  ]
+  ].filter((campaign) => !hiddenCampaigns.includes(campaign.id))
+
+  const deleteCampaign = (campaignId: string) => {
+    setCustomCampaigns((current) => current.filter((campaign) => campaign.id !== campaignId))
+    setHiddenCampaigns((current) => current.includes(campaignId) ? current : [...current, campaignId])
+    setExpandedCampaign((current) => current === campaignId ? null : current)
+  }
 
   const copyLink = async (shortUrl: string) => {
     await navigator.clipboard?.writeText(shortUrl)
@@ -382,13 +404,17 @@ function App() {
   }
 
   const exportAnalytics = () => {
-    const total = analyticsData.referrers.reduce((sum, item) => sum + item.clicks, 0)
-    const rows = ['Source,Clicks,Share',...analyticsData.referrers.map((item) => `${item.source},${item.clicks},${total? Math.round((item.clicks / total) * 100) : 0}%`), '', 'Date,Clicks',...analyticsData.daily.map((item) => `${item.date},${item.clicks}`)]
-    const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const escapeCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`
+    const rows = [
+      ['Original URL', 'Short Code', 'Total Clicks', 'Created At'],
+      ...links.map((link) => [link.longUrl, link.shortCode, link.clickCount, link.createdAt]),
+    ]
+    const csv = rows.map((row) => row.map(escapeCell).join(',')).join('\r\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `analytics-${new Date().toISOString().slice(0, 10)}.csv`
+    anchor.download = `links-analytics-${new Date().toISOString().slice(0, 10)}.csv`
     anchor.click()
     URL.revokeObjectURL(url)
   }
@@ -413,7 +439,7 @@ function App() {
     }
 
     if (activePage === 'campaigns') {
-      return <><div className="page-heading"><div><p className="eyebrow">Organize your growth</p><h2>Campaigns</h2><p>Group related links and track the momentum of every initiative.</p></div><button type="button" className="primary-button" onClick={() => setNotice({ type: 'success', text: 'Campaign creation is ready for your next launch.' })}>+ New Campaign</button></div><section className="campaign-grid">{campaignGroups.map((campaign) => { const clicks = campaign.links.reduce((sum, link) => sum + link.clickCount, 0) || (campaign.id === 'blackfriday'? 1240 : campaign.id === 'product-launch'? 860 : 520); const progress = Math.min(100, Math.round(clicks / 20)); return <article className="campaign-card" key={campaign.id}><div className="campaign-card-top"><span className="campaign-icon" style={{ backgroundColor: campaign.color }}><Megaphone size={17} /></span><button type="button" className="more-button" onClick={() => setExpandedCampaign(expandedCampaign === campaign.id? null : campaign.id)}>{expandedCampaign === campaign.id? 'Hide links' : 'View links'}</button></div><h3>{campaign.name}</h3><div className="campaign-meta"><span>{campaign.links.length || 3} links</span><strong>{clicks.toLocaleString()} clicks</strong></div><div className="progress-track"><span style={{ width: `${progress}%`, backgroundColor: campaign.color }} /></div><small>{progress}% of monthly goal</small>{expandedCampaign === campaign.id? <div className="campaign-links">{(campaign.links.length > 0? campaign.links : [{ id: `${campaign.id}-demo`, shortUrl: `short.ly/${campaign.id}` } as UrlLink]).map((link) => <div key={link.id}><Link2 size={14} /><span>{link.shortUrl}</span></div>)}</div> : null}</article> })}</section></>
+      return <><div className="page-heading"><div><p className="eyebrow">Organize your growth</p><h2>Campaigns</h2><p>Group related links and track the momentum of every initiative.</p></div><button type="button" className="primary-button" onClick={() => setIsCreatingCampaign((current) => !current)}>{isCreatingCampaign ? 'Cancel' : '+ New Campaign'}</button></div>{isCreatingCampaign ? <form className="campaign-create-form" onSubmit={createCampaign}><label htmlFor="campaign-name">Campaign title<input id="campaign-name" autoFocus maxLength={60} placeholder="Name this campaign" value={campaignName} onChange={(event) => setCampaignName(event.target.value)} required /></label><button type="submit" className="primary-button">Create campaign</button></form> : null}<section className="campaign-grid">{campaignGroups.map((campaign) => { const clicks = campaign.links.reduce((sum, link) => sum + link.clickCount, 0) || (campaign.id === 'blackfriday'? 1240 : campaign.id === 'product-launch'? 860 : 520); const progress = Math.min(100, Math.round(clicks / 20)); return <article className="campaign-card" key={campaign.id}><div className="campaign-card-top"><span className="campaign-icon" style={{ backgroundColor: campaign.color }}><Megaphone size={17} /></span><div className="campaign-card-actions"><button type="button" className="more-button" onClick={() => setExpandedCampaign(expandedCampaign === campaign.id? null : campaign.id)}>{expandedCampaign === campaign.id? 'Hide links' : 'View links'}</button><button type="button" className="icon-action danger" onClick={() => deleteCampaign(campaign.id)} aria-label={`Delete ${campaign.name} campaign`} title="Delete campaign"><Trash2 size={15} /></button></div></div><h3>{campaign.name}</h3><div className="campaign-meta"><span>{campaign.links.length || 3} links</span><strong>{clicks.toLocaleString()} clicks</strong></div><div className="progress-track"><span style={{ width: `${progress}%`, backgroundColor: campaign.color }} /></div><small>{progress}% of monthly goal</small>{expandedCampaign === campaign.id? <div className="campaign-links">{(campaign.links.length > 0? campaign.links : [{ id: `${campaign.id}-demo`, shortUrl: `short.ly/${campaign.id}` } as UrlLink]).map((link) => <div key={link.id}><Link2 size={14} /><span>{link.shortUrl}</span></div>)}</div> : null}</article> })}</section></>
       }
     return <><div className="page-heading"><div><p className="eyebrow">Workspace controls</p><h2>Settings</h2><p>Keep your profile, brand, and link defaults in sync.</p></div></div><section className="panel settings-panel"><div className="settings-tabs">{(['Profile', 'Branding', 'Preferences'] as const).map((tab) => <button key={tab} type="button" className={settingsTab === tab? 'active' : ''} onClick={() => setSettingsTab(tab)}>{tab}</button>)}</div><div className="settings-content">{settingsTab === 'Profile'? <ProfileSettings profile={profile} onUpdate={updateProfile} /> : null}{settingsTab === 'Branding'? <div className="settings-form"><label>Default domain<select value={settings.domain} onChange={(event) => setSettings((current) => ({...current, domain: event.target.value }))}><option>short.ly/</option><option>links.linklytics.com/</option></select></label><label>Theme color<div className="color-setting"><input type="color" value={settings.theme} onChange={(event) => setSettings((current) => ({...current, theme: event.target.value }))} /><span>{settings.theme}</span></div></label><button type="button" className="primary-button">Save branding</button></div> : null}{settingsTab === 'Preferences'? <div className="settings-form"><label>Default expiry time<select value={settings.expiry} onChange={(event) => setSettings((current) => ({...current, expiry: event.target.value }))}><option>7 days</option><option>30 days</option><option>90 days</option><option>Never</option></select></label><label>Default max clicks<select value={settings.maxClicks} onChange={(event) => setSettings((current) => ({...current, maxClicks: event.target.value }))}><option>Unlimited</option><option>100 clicks</option><option>1,000 clicks</option></select></label><label className="checkbox-row"><input type="checkbox" checked={settings.emailAlerts} onChange={(event) => setSettings((current) => ({...current, emailAlerts: event.target.checked }))} /> Enable email alert when link expires</label><button type="button" className="primary-button">Save preferences</button></div> : null}</div></section></>
   }
@@ -708,8 +734,8 @@ function App() {
                   </td>
                   <td>{link.clickCount}</td>
                   <td>
-                    <button type="button" className="link-action" onClick={() => simulateClick(link.id)}>
-                      Track click
+                    <button type="button" className="link-action" onClick={() => openShortLink(link.shortUrl)}>
+                      Open link
                     </button>
                   </td>
                 </tr>
