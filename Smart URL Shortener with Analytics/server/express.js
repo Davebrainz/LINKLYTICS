@@ -14,6 +14,11 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'linklytics_secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/linklytics';
+const isProduction = process.env.NODE_ENV === 'production';
+
+if (isProduction && !process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET must be configured in production.');
+}
 
 const inMemoryUsers = [];
 const inMemoryLinks = [];
@@ -22,6 +27,7 @@ let mongoReady = false;
 
 app.use(cors());
 app.use(express.json({ extended: true }));
+app.set('trust proxy', 1);
 
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -132,11 +138,15 @@ const seedMongoDemoUser = async () => {
 
 const connectDatabase = async () => {
   try {
+    if (isProduction && !process.env.MONGODB_URI) {
+      throw new Error('MONGODB_URI must be configured in production.');
+    }
     await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 5000 });
     mongoReady = true;
     console.log('MongoDB connected');
-    await seedMongoDemoUser();
+    if (!isProduction) await seedMongoDemoUser();
   } catch (error) {
+    if (isProduction) throw error;
     mongoReady = false;
     console.log('MongoDB unavailable — using in-memory storage for this demo.');
     await seedMemoryDemoUser();
@@ -327,7 +337,7 @@ app.post('/api/links', getAuthUser, async (req, res) => {
     const slugValue = (customSlug || generateShortCode()).trim();
     const finalSlug = slugValue.replace(/\s+/g, '-');
     const shortCode = finalSlug.toUpperCase();
-    const shortUrl = `http://localhost:5000/${finalSlug.toLowerCase()}`;
+    const shortUrl = `${req.protocol}://${req.get('host')}/${finalSlug.toLowerCase()}`;
 
     if (mongoReady) {
       const existing = await Link.findOne({ $or: [{ shortCode }, { customSlug: finalSlug.toLowerCase() }, { shortUrl }] });
@@ -570,8 +580,16 @@ app.post('/api/links/:id/click', getAuthUser, async (req, res) => {
   }
 });
 
-connectDatabase();
+const startServer = async () => {
+  if (isProduction) await connectDatabase();
+  else connectDatabase();
 
-app.listen(PORT, () => {
-  console.log(`Linklytics server running on http://localhost:${PORT}`);
+  app.listen(PORT, () => {
+    console.log(`Linklytics server listening on port ${PORT}`);
+  });
+};
+
+startServer().catch((error) => {
+  console.error('Unable to start Linklytics server:', error.message);
+  process.exit(1);
 });
