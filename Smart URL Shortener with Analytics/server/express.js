@@ -54,6 +54,7 @@ const linkSchema = new mongoose.Schema({
   shortCode: { type: String, required: true, unique: true },
   customSlug: { type: String, unique: true, sparse: true },
   shortUrl: { type: String, required: true, unique: true },
+  campaignId: String,
   expiresAt: Date,
   maxClicks: Number,
   clickCount: { type: Number, default: 0 },
@@ -99,6 +100,7 @@ const normalizeLinkDocument = (link) => ({
   longUrl: link.longUrl,
   shortCode: link.shortCode,
   shortUrl: link.shortUrl,
+  campaignId: link.campaignId,
   customSlug: link.customSlug,
   expiresAt: link.expiresAt,
   maxClicks: link.maxClicks,
@@ -327,10 +329,13 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.post('/api/links', getAuthUser, async (req, res) => {
   try {
-    const { longUrl, customSlug, expiresAt, maxClicks, title } = req.body;
+    const { longUrl, customSlug, expiresAt, maxClicks, title, campaignId } = req.body;
 
     if (!longUrl) {
       return res.status(400).json({ message: 'longUrl is required' });
+    }
+    if (typeof campaignId !== 'string' || !campaignId.trim()) {
+      return res.status(400).json({ message: 'Select a campaign before creating a link.' });
     }
 
     const normalizedUrl = /^https?:\/\//i.test(longUrl) ? longUrl : `https://${longUrl}`;
@@ -353,6 +358,7 @@ app.post('/api/links', getAuthUser, async (req, res) => {
         shortCode,
         customSlug: finalSlug.toLowerCase(),
         shortUrl,
+        campaignId,
         expiresAt: expiresAt ? new Date(expiresAt) : undefined,
         maxClicks: maxClicks ? Number(maxClicks) : undefined,
         clickCount: 0,
@@ -383,6 +389,7 @@ app.post('/api/links', getAuthUser, async (req, res) => {
       shortCode,
       customSlug: finalSlug.toLowerCase(),
       shortUrl,
+      campaignId,
       expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined,
       maxClicks: maxClicks ? Number(maxClicks) : undefined,
       clickCount: 0,

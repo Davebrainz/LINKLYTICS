@@ -42,6 +42,7 @@ const linkSchema = new mongoose.Schema({
   shortCode: { type: String, required: true, unique: true },
   customSlug: { type: String, unique: true, sparse: true },
   shortUrl: { type: String, required: true, unique: true },
+  campaignId: String,
   expiresAt: Date,
   maxClicks: Number,
   clickCount: { type: Number, default: 0 },
@@ -121,6 +122,7 @@ function formatLink(link, clickList = []) {
     longUrl: link.longUrl,
     shortCode: link.shortCode,
     shortUrl: link.shortUrl,
+    campaignId: link.campaignId,
     customSlug: link.customSlug,
     expiresAt: link.expiresAt,
     maxClicks: link.maxClicks,
@@ -221,8 +223,11 @@ export async function createLink(request) {
   try {
     const auth = await authorizedUser(request);
     if (auth.response) return auth.response;
-    const { longUrl, customSlug, expiresAt, maxClicks, title } = await request.json();
+    const { longUrl, customSlug, expiresAt, maxClicks, title, campaignId } = await request.json();
     if (!longUrl) return json({ message: 'longUrl is required' }, 400);
+    if (typeof campaignId !== 'string' || !campaignId.trim()) {
+      return json({ message: 'Select a campaign before creating a link.' }, 400);
+    }
     const normalizedUrl = /^https?:\/\//i.test(longUrl) ? longUrl : `https://${longUrl}`;
     const slug = (customSlug || generateShortCode()).trim().replace(/\s+/g, '-').toLowerCase();
     const shortCode = slug.toUpperCase();
@@ -234,6 +239,7 @@ export async function createLink(request) {
     const qrCode = await QRCode.toDataURL(shortUrl);
     const values = {
       title: title || 'Campaign Link', longUrl: normalizedUrl, shortCode, customSlug: slug, shortUrl,
+      campaignId,
       expiresAt: expiresAt ? new Date(expiresAt) : undefined,
       maxClicks: maxClicks ? Number(maxClicks) : undefined,
       clickCount: 0, status: 'Active', qrCode, clickEvents: [],
@@ -348,4 +354,3 @@ export async function redirectShortLink(request, { params }) {
     return json({ message: 'Redirect failed', error: errorMessage(error) }, 500);
   }
 }
-

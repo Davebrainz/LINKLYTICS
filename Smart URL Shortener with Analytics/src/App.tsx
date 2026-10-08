@@ -29,6 +29,7 @@ type UrlLink = {
   createdAt: string
   expiresAt?: string
   maxClicks?: number
+  campaignId?: string
   clickCount: number
   status: 'Active' | 'Expired' | 'Limit Reached'
   clickEvents: ClickEvent[]
@@ -97,6 +98,7 @@ function App() {
   const [activePage, setActivePage] = useState<Page>('dashboard')
   const [linkSearch, setLinkSearch] = useState('')
   const [linkFilter, setLinkFilter] = useState<'All' | 'Active' | 'Expired'>('All')
+  const [selectedCampaignId, setSelectedCampaignId] = useState('')
   const [expandedCampaign, setExpandedCampaign] = useState<string | null>(null)
   const [hiddenCampaigns, setHiddenCampaigns] = useState<string[]>(() => {
     try {
@@ -142,6 +144,7 @@ function App() {
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   const selectedLink = links.find((link) => link.id === selectedId)?? links[0]
+  const qrSelectedLink = links.find((link) => link.shortUrl === qrLink)
 
   const aggregateStats = useMemo(() => {
     const totalLinks = links.length
@@ -316,6 +319,11 @@ function App() {
       return
     }
 
+    if (!selectedCampaignId) {
+      setNotice({ type: 'error', text: 'Select a campaign before creating a link.' })
+      return
+    }
+
     const response = await fetch(`${API_BASE}/links`, {
       method: 'POST',
       headers: {
@@ -324,6 +332,7 @@ function App() {
       },
       body: JSON.stringify({
         longUrl: form.longUrl,
+        campaignId: selectedCampaignId,
         customSlug: form.customSlug,
         expiresAt: form.expiresAt,
         maxClicks: form.maxClicks? Number(form.maxClicks) : undefined,
@@ -347,18 +356,32 @@ function App() {
     event.preventDefault()
     const name = campaignName.trim()
     if (!name) return
+    const createdCampaignId = `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     setCustomCampaigns((current) => [...current, {
-      id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: createdCampaignId,
       name,
       color: settings.theme,
     }])
+    setSelectedCampaignId(createdCampaignId)
     setCampaignName('')
     setIsCreatingCampaign(false)
     setNotice({ type: 'success', text: 'Campaign created successfully.' })
   }
 
-  const openShortLink = (shortUrl: string) => {
-    window.open(shortUrl, '_blank', 'noopener,noreferrer')
+  const openDirectLink = (longUrl: string) => {
+    window.open(longUrl, '_blank', 'noopener,noreferrer')
+  }
+
+  const openTrackedLink = (link: UrlLink) => {
+    window.open(link.shortUrl, '_blank', 'noopener,noreferrer')
+
+    if (token) {
+      window.setTimeout(() => {
+        void Promise.all([fetchLinks(token), fetchAnalytics(token)]).catch((error) => {
+          setNotice({ type: 'error', text: error instanceof Error ? error.message : 'Unable to refresh link analytics.' })
+        })
+      }, 1000)
+    }
   }
 
   const maxTraffic = Math.max(...dailyTraffic.map((point) => point.value), 1)
@@ -380,16 +403,20 @@ function App() {
     return matchesSearch && matchesFilter
   })
   const campaignGroups = [
-    { id: 'blackfriday', name: 'Black Friday Sale', color: '#f97316', links: links.filter((link) => /black|sale/i.test(`${link.title} ${link.longUrl}`)) },
-    { id: 'product-launch', name: 'Product Launch', color: '#4f46e5', links: links.filter((link) => /product|launch/i.test(`${link.title} ${link.longUrl}`)) },
-    { id: 'always-on', name: 'Always-on Content', color: '#0d9488', links: links.filter((link) =>!/black|sale|product|launch/i.test(`${link.title} ${link.longUrl}`)) },
-   ...customCampaigns.map((campaign) => ({...campaign, links: [] as UrlLink[] })),
-  ].filter((campaign) => !hiddenCampaigns.includes(campaign.id))
+    { id: 'blackfriday', name: 'Black Friday Sale', color: '#f97316' },
+    { id: 'product-launch', name: 'Product Launch', color: '#4f46e5' },
+    { id: 'always-on', name: 'Always-on Content', color: '#0d9488' },
+    ...customCampaigns,
+  ].map((campaign) => ({
+    ...campaign,
+    links: links.filter((link) => link.campaignId === campaign.id),
+  })).filter((campaign) => !hiddenCampaigns.includes(campaign.id))
 
   const deleteCampaign = (campaignId: string) => {
     setCustomCampaigns((current) => current.filter((campaign) => campaign.id !== campaignId))
     setHiddenCampaigns((current) => current.includes(campaignId) ? current : [...current, campaignId])
     setExpandedCampaign((current) => current === campaignId ? null : current)
+    setSelectedCampaignId((current) => current === campaignId ? '' : current)
   }
 
   const copyLink = async (shortUrl: string) => {
@@ -430,7 +457,7 @@ function App() {
       return <>
         <div className="page-heading"><div><p className="eyebrow">Workspace library</p><h2>All shortened links</h2><p>Search, filter, and manage every link in one place.</p></div><button type="button" className="primary-button" onClick={() => { setActivePage('dashboard'); setTimeout(() => document.querySelector('.shorten-form input')?.scrollIntoView({ behavior: 'smooth' }), 0) }}>Create link</button></div>
         <section className="stats-grid compact-stats"><article className="stat-card"><span>Total links</span><strong>{links.length}</strong><small>Across your workspace</small></article><article className="stat-card"><span>Active</span><strong>{links.filter((link) => link.status === 'Active').length}</strong><small>Ready to share</small></article><article className="stat-card"><span>Expired</span><strong>{links.filter((link) => link.status === 'Expired' || (link.expiresAt && new Date(link.expiresAt) <= new Date())).length}</strong><small>Need attention</small></article></section>
-        <section className="panel links-library"><div className="library-toolbar"><label className="search-field"><Search size={17} /><input placeholder="Search links..." value={linkSearch} onChange={(event) => setLinkSearch(event.target.value)} /></label><div className="filter-tabs">{(['All', 'Active', 'Expired'] as const).map((filter) => <button key={filter} type="button" className={linkFilter === filter? 'active' : ''} onClick={() => setLinkFilter(filter)}>{filter}</button>)}</div></div><div className="table-scroll"><table><thead><tr><th>Short Link</th><th>Original URL</th><th>Clicks</th><th>Created</th><th>Expiry</th><th>Status</th><th>Actions</th></tr></thead><tbody>{filteredLinks.length > 0? filteredLinks.map((link) => <tr key={link.id}><td><strong className="short-link-cell">{link.shortUrl.replace('http://localhost:5000/', 'short.ly/')}</strong></td><td className="url-cell">{link.longUrl}</td><td>{link.clickCount}</td><td>{new Date(link.createdAt).toLocaleDateString()}</td><td>{link.expiresAt? new Date(link.expiresAt).toLocaleDateString() : 'Never'}</td><td><span className={`status-pill ${link.status.toLowerCase().replace(/\s+/g, '-')}`}>{link.status}</span></td><td><div className="row-actions"><button type="button" className="icon-action" onClick={() => copyLink(link.shortUrl)} aria-label="Copy short link"><Copy size={15} /></button><button type="button" className="icon-action" onClick={() => window.open(link.qrCode || `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(link.shortUrl)}`, '_blank')} aria-label="Generate QR code"><QrCode size={15} /></button><button type="button" className="icon-action danger" onClick={() => deleteLink(link.id)} aria-label="Delete link"><Trash2 size={15} /></button></div></td></tr>) : <tr><td colSpan={7} className="empty-state">No links match this filter yet.</td></tr>}</tbody></table></div></section>
+        <section className="panel links-library"><div className="library-toolbar"><label className="search-field"><Search size={17} /><input placeholder="Search links..." value={linkSearch} onChange={(event) => setLinkSearch(event.target.value)} /></label><div className="filter-tabs">{(['All', 'Active', 'Expired'] as const).map((filter) => <button key={filter} type="button" className={linkFilter === filter? 'active' : ''} onClick={() => setLinkFilter(filter)}>{filter}</button>)}</div></div><div className="table-scroll"><table><thead><tr><th>Short Link</th><th>Original URL</th><th>Clicks</th><th>Created</th><th>Expiry</th><th>Status</th><th>Actions</th></tr></thead><tbody>{filteredLinks.length > 0? filteredLinks.map((link) => <tr key={link.id}><td><strong className="short-link-cell">{link.shortUrl.replace('http://localhost:5000/', 'short.ly/')}</strong></td><td className="url-cell">{link.longUrl}</td><td>{link.clickCount}</td><td>{new Date(link.createdAt).toLocaleDateString()}</td><td>{link.expiresAt? new Date(link.expiresAt).toLocaleDateString() : 'Never'}</td><td><span className={`status-pill ${link.status.toLowerCase().replace(/\s+/g, '-')}`}>{link.status}</span></td><td><div className="row-actions"><button type="button" className="icon-action" onClick={() => copyLink(link.shortUrl)} aria-label="Copy short link"><Copy size={15} /></button><button type="button" className="icon-action" onClick={() => setQrLink(link.shortUrl)} aria-label={`Show QR code for ${link.shortCode}`}><QrCode size={15} /></button><button type="button" className="icon-action danger" onClick={() => deleteLink(link.id)} aria-label="Delete link"><Trash2 size={15} /></button></div></td></tr>) : <tr><td colSpan={7} className="empty-state">No links match this filter yet.</td></tr>}</tbody></table></div></section>
       </>
     }
 
@@ -439,8 +466,39 @@ function App() {
     }
 
     if (activePage === 'campaigns') {
-      return <><div className="page-heading"><div><p className="eyebrow">Organize your growth</p><h2>Campaigns</h2><p>Group related links and track the momentum of every initiative.</p></div><button type="button" className="primary-button" onClick={() => setIsCreatingCampaign((current) => !current)}>{isCreatingCampaign ? 'Cancel' : '+ New Campaign'}</button></div>{isCreatingCampaign ? <form className="campaign-create-form" onSubmit={createCampaign}><label htmlFor="campaign-name">Campaign title<input id="campaign-name" autoFocus maxLength={60} placeholder="Name this campaign" value={campaignName} onChange={(event) => setCampaignName(event.target.value)} required /></label><button type="submit" className="primary-button">Create campaign</button></form> : null}<section className="campaign-grid">{campaignGroups.map((campaign) => { const clicks = campaign.links.reduce((sum, link) => sum + link.clickCount, 0) || (campaign.id === 'blackfriday'? 1240 : campaign.id === 'product-launch'? 860 : 520); const progress = Math.min(100, Math.round(clicks / 20)); return <article className="campaign-card" key={campaign.id}><div className="campaign-card-top"><span className="campaign-icon" style={{ backgroundColor: campaign.color }}><Megaphone size={17} /></span><div className="campaign-card-actions"><button type="button" className="more-button" onClick={() => setExpandedCampaign(expandedCampaign === campaign.id? null : campaign.id)}>{expandedCampaign === campaign.id? 'Hide links' : 'View links'}</button><button type="button" className="icon-action danger" onClick={() => deleteCampaign(campaign.id)} aria-label={`Delete ${campaign.name} campaign`} title="Delete campaign"><Trash2 size={15} /></button></div></div><h3>{campaign.name}</h3><div className="campaign-meta"><span>{campaign.links.length || 3} links</span><strong>{clicks.toLocaleString()} clicks</strong></div><div className="progress-track"><span style={{ width: `${progress}%`, backgroundColor: campaign.color }} /></div><small>{progress}% of monthly goal</small>{expandedCampaign === campaign.id? <div className="campaign-links">{(campaign.links.length > 0? campaign.links : [{ id: `${campaign.id}-demo`, shortUrl: `short.ly/${campaign.id}` } as UrlLink]).map((link) => <div key={link.id}><Link2 size={14} /><span>{link.shortUrl}</span></div>)}</div> : null}</article> })}</section></>
-      }
+      return <>
+        <div className="page-heading">
+          <div><p className="eyebrow">Organize your growth</p><h2>Campaigns</h2><p>Group related links and track the momentum of every initiative.</p></div>
+          <button type="button" className="primary-button" onClick={() => setIsCreatingCampaign((current) => !current)}>{isCreatingCampaign ? 'Cancel' : '+ New Campaign'}</button>
+        </div>
+        {isCreatingCampaign ? <form className="campaign-create-form" onSubmit={createCampaign}>
+          <label htmlFor="campaign-name">Campaign title<input id="campaign-name" autoFocus maxLength={60} placeholder="Name this campaign" value={campaignName} onChange={(event) => setCampaignName(event.target.value)} required /></label>
+          <button type="submit" className="primary-button">Create campaign</button>
+        </form> : null}
+        <section className="campaign-grid">
+          {campaignGroups.map((campaign) => {
+            const clicks = campaign.links.reduce((sum, link) => sum + link.clickCount, 0)
+            const progress = Math.min(100, Math.round(clicks / 20))
+            return <article className="campaign-card" key={campaign.id}>
+              <div className="campaign-card-top">
+                <span className="campaign-icon" style={{ backgroundColor: campaign.color }}><Megaphone size={17} /></span>
+                <div className="campaign-card-actions">
+                  <button type="button" className="more-button" onClick={() => setExpandedCampaign(expandedCampaign === campaign.id ? null : campaign.id)}>{expandedCampaign === campaign.id ? 'Hide links' : 'View links'}</button>
+                  {campaign.id.startsWith('custom-') ? <button type="button" className="icon-action danger" onClick={() => deleteCampaign(campaign.id)} aria-label={`Delete ${campaign.name} campaign`} title="Delete campaign"><Trash2 size={15} /></button> : null}
+                </div>
+              </div>
+              <h3>{campaign.name}</h3>
+              <div className="campaign-meta"><span>{campaign.links.length} links</span><strong>{clicks.toLocaleString()} clicks</strong></div>
+              <div className="progress-track"><span style={{ width: `${progress}%`, backgroundColor: campaign.color }} /></div>
+              <small>{progress}% of monthly goal</small>
+              {expandedCampaign === campaign.id ? <div className="campaign-links">
+                {campaign.links.length > 0 ? campaign.links.map((link) => <div key={link.id}><Link2 size={14} /><span>{link.shortUrl}</span><strong>{link.clickCount} clicks</strong></div>) : <p>No links in this campaign yet.</p>}
+              </div> : null}
+            </article>
+          })}
+        </section>
+      </>
+    }
     return <><div className="page-heading"><div><p className="eyebrow">Workspace controls</p><h2>Settings</h2><p>Keep your profile, brand, and link defaults in sync.</p></div></div><section className="panel settings-panel"><div className="settings-tabs">{(['Profile', 'Branding', 'Preferences'] as const).map((tab) => <button key={tab} type="button" className={settingsTab === tab? 'active' : ''} onClick={() => setSettingsTab(tab)}>{tab}</button>)}</div><div className="settings-content">{settingsTab === 'Profile'? <ProfileSettings profile={profile} onUpdate={updateProfile} /> : null}{settingsTab === 'Branding'? <div className="settings-form"><label>Default domain<select value={settings.domain} onChange={(event) => setSettings((current) => ({...current, domain: event.target.value }))}><option>short.ly/</option><option>links.linklytics.com/</option></select></label><label>Theme color<div className="color-setting"><input type="color" value={settings.theme} onChange={(event) => setSettings((current) => ({...current, theme: event.target.value }))} /><span>{settings.theme}</span></div></label><button type="button" className="primary-button">Save branding</button></div> : null}{settingsTab === 'Preferences'? <div className="settings-form"><label>Default expiry time<select value={settings.expiry} onChange={(event) => setSettings((current) => ({...current, expiry: event.target.value }))}><option>7 days</option><option>30 days</option><option>90 days</option><option>Never</option></select></label><label>Default max clicks<select value={settings.maxClicks} onChange={(event) => setSettings((current) => ({...current, maxClicks: event.target.value }))}><option>Unlimited</option><option>100 clicks</option><option>1,000 clicks</option></select></label><label className="checkbox-row"><input type="checkbox" checked={settings.emailAlerts} onChange={(event) => setSettings((current) => ({...current, emailAlerts: event.target.checked }))} /> Enable email alert when link expires</label><button type="button" className="primary-button">Save preferences</button></div> : null}</div></section></>
   }
 
@@ -509,7 +567,18 @@ function App() {
 
   return (
     <div className="app-shell">
-      {qrLink? <div className="qr-modal-overlay" onClick={() => setQrLink(null)}><div className="qr-modal-card" onClick={(event) => event.stopPropagation()}><button type="button" className="qr-close-btn" onClick={() => setQrLink(null)} aria-label="Close QR code">×</button><h3>Scan QR Code</h3><p>{qrLink}</p><img className="real-qr" src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrLink)}`} alt="QR code for short link" /></div></div> : null}
+      {qrLink ? <div className="qr-modal-overlay" onClick={() => setQrLink(null)}>
+        <div className="qr-modal-card" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title" onClick={(event) => event.stopPropagation()}>
+          <button type="button" className="qr-close-btn" onClick={() => setQrLink(null)} aria-label="Close QR code">×</button>
+          <h3 id="qr-modal-title">Scan QR Code</h3>
+          <p>{qrLink}</p>
+          {qrSelectedLink?.qrCode ? <img className="real-qr enlarged-qr" src={qrSelectedLink.qrCode} alt={`QR code for ${qrLink}`} /> : <p className="qr-unavailable">QR code is not available for this link.</p>}
+          <div className="qr-modal-actions">
+            <button type="button" className="ghost-button" onClick={() => setQrLink(null)}>Close</button>
+            {qrSelectedLink?.qrCode ? <a className="primary-button" href={qrSelectedLink.qrCode} download={`link-${qrSelectedLink.shortCode}-qr.png`}>Download</a> : null}
+          </div>
+        </div>
+      </div> : null}
       <aside className={`sidebar ${isCollapsed? 'collapsed' : ''}`}>
         <button type="button" className="menu-toggle-btn" onClick={() => setIsCollapsed((current) =>!current)} title={isCollapsed? 'Open menu' : 'Close menu'} aria-label={isCollapsed? 'Open menu' : 'Close menu'}>
           <Menu size={20} />
@@ -557,6 +626,14 @@ function App() {
                 <h3>Shorten a long URL</h3>
               </div>
             </div>
+
+            <label>
+              Campaign
+              <select className="campaign-select" value={selectedCampaignId} onChange={(event) => setSelectedCampaignId(event.target.value)} required>
+                <option value="">Select a campaign</option>
+                {campaignGroups.map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.name}</option>)}
+              </select>
+            </label>
 
             <label>
               Original URL
@@ -620,7 +697,7 @@ function App() {
             </div>
 
             <div className="qr-wrap">
-              <img className="real-qr" src={selectedLink?.qrCode || `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(selectedLink?.shortUrl?? 'https://short.ly/preview')}`} alt="QR code for selected short link" />
+              {selectedLink?.qrCode ? <img className="real-qr" src={selectedLink.qrCode} alt="QR code for selected short link" /> : null}
               <small>Scan to open the short link</small><button type="button" className="ghost-button small" onClick={() => selectedLink && setQrLink(selectedLink.shortUrl)}>Enlarge QR</button>
             </div>
           </div>
@@ -734,9 +811,14 @@ function App() {
                   </td>
                   <td>{link.clickCount}</td>
                   <td>
-                    <button type="button" className="link-action" onClick={() => openShortLink(link.shortUrl)}>
+                    <div className="link-actions">
+                    <button type="button" className="link-action" onClick={() => openDirectLink(link.shortUrl)}>
                       Open link
                     </button>
+                    <button type="button" className="link-action track-link-action" onClick={() => openTrackedLink(link)}>
+                      Track link
+                    </button>
+                    </div>
                   </td>
                 </tr>
               ))}
