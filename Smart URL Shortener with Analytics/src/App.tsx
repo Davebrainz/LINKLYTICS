@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { BarChart3, Check, Copy, LayoutDashboard, Link2, Megaphone, Menu, Moon, QrCode, Search, Settings, Sun, Trash2 } from 'lucide-react'
 import { Bar, BarChart, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import type PptxGenJS from 'pptxgenjs'
 import './App.css'
 import Header from './components/Header'
 import Logo from './components/Logo'
@@ -372,15 +373,27 @@ function App() {
     window.open(longUrl, '_blank', 'noopener,noreferrer')
   }
 
-  const openTrackedLink = (link: UrlLink) => {
-    window.open(link.shortUrl, '_blank', 'noopener,noreferrer')
+  const trackLink = async (link: UrlLink) => {
+    if (!token) {
+      setNotice({ type: 'error', text: 'Please log in again to record this click.' })
+      return
+    }
 
-    if (token) {
-      window.setTimeout(() => {
-        void Promise.all([fetchLinks(token), fetchAnalytics(token)]).catch((error) => {
-          setNotice({ type: 'error', text: error instanceof Error ? error.message : 'Unable to refresh link analytics.' })
-        })
-      }, 1000)
+    try {
+      const response = await fetch(`${API_BASE}/links/${encodeURIComponent(link.id)}/click`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const result = await response.json()
+      if (!response.ok) {
+        throw new Error(result.message || 'Unable to track this click.')
+      }
+
+      setLinks((current) => current.map((item) => item.id === link.id ? result.link : item))
+      await fetchAnalytics(token)
+      setNotice({ type: 'success', text: `Click tracked for ${link.shortUrl}.` })
+    } catch (error) {
+      setNotice({ type: 'error', text: error instanceof Error ? error.message : 'Unable to track this click.' })
     }
   }
 
@@ -430,20 +443,148 @@ function App() {
     setNotice({ type: 'success', text: 'Link removed from this workspace.' })
   }
 
-  const exportAnalytics = () => {
-    const escapeCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`
-    const rows = [
-      ['Original URL', 'Short Code', 'Total Clicks', 'Created At'],
-      ...links.map((link) => [link.longUrl, link.shortCode, link.clickCount, link.createdAt]),
-    ]
-    const csv = rows.map((row) => row.map(escapeCell).join(',')).join('\r\n')
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `links-analytics-${new Date().toISOString().slice(0, 10)}.csv`
-    anchor.click()
-    URL.revokeObjectURL(url)
+  const exportAnalytics = async () => {
+    try {
+      const { default: PptxGenJS } = await import('pptxgenjs')
+      const pptx = new PptxGenJS()
+      pptx.layout = 'LAYOUT_WIDE'
+      pptx.author = profile.name || profile.email
+      pptx.subject = 'Linklytics link and campaign activity analytics'
+      pptx.title = 'Linklytics Analytics Report'
+      pptx.company = 'Linklytics'
+      pptx.theme = {
+        headFontFace: 'Aptos Display',
+        bodyFontFace: 'Aptos',
+      }
+
+      const totalClicks = links.reduce((sum, link) => sum + link.clickCount, 0)
+      const recordedClicks = links.flatMap((link) => link.clickEvents.map((event) => ({ link, event })))
+      const campaignName = (campaignId?: string) => campaignGroups.find((campaign) => campaign.id === campaignId)?.name || 'Unassigned / legacy'
+      const dateText = (value: string | undefined) => {
+        if (!value) return 'Unknown'
+        const date = new Date(value)
+        return Number.isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString()
+      }
+      const breakdown = (readValue: (item: typeof recordedClicks[number]) => string) => {
+        const counts = new Map<string, number>()
+        recordedClicks.forEach((item) => {
+          const key = readValue(item) || 'Unknown'
+          counts.set(key, (counts.get(key) || 0) + 1)
+        })
+        return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([label, count]) => [label, String(count)])
+      }
+
+      const addSlideHeader = (slide: PptxGenJS.Slide, title: string, subtitle: string) => {
+        slide.background = { color: 'F6F8FC' }
+        slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: 13.333, h: 0.16, line: { color: '4F46E5', transparency: 100 }, fill: { color: '4F46E5' } })
+        slide.addText(title, { x: 0.55, y: 0.35, w: 12.2, h: 0.42, fontFace: 'Aptos Display', fontSize: 23, bold: true, color: '172554', margin: 0 })
+        slide.addText(subtitle, { x: 0.55, y: 0.83, w: 12.2, h: 0.3, fontFace: 'Aptos', fontSize: 10, color: '64748B', margin: 0 })
+        slide.addText(`Linklytics Analytics  |  ${new Date().toLocaleDateString()}`, { x: 0.55, y: 7.12, w: 12.2, h: 0.18, fontFace: 'Aptos', fontSize: 8, color: '94A3B8', align: 'right', margin: 0 })
+      }
+
+      const addTableSection = (title: string, subtitle: string, headers: string[], rows: string[][], colW: number[]) => {
+        const pageSize = 13
+        const pageCount = Math.max(1, Math.ceil(rows.length / pageSize))
+        for (let page = 0; page < pageCount; page += 1) {
+          const slide = pptx.addSlide()
+          addSlideHeader(slide, title, pageCount > 1 ? `${subtitle} (page ${page + 1} of ${pageCount})` : subtitle)
+          const pageRows = rows.slice(page * pageSize, (page + 1) * pageSize)
+          const tableRows = [
+            headers.map((text) => ({ text, options: { bold: true, color: 'FFFFFF', fill: { color: '1E3A8A' }, fontSize: 9, margin: 0.06 } })),
+            ...(pageRows.length ? pageRows : [headers.map(() => 'No recorded activity')]).map((row, rowIndex) =>
+              row.map((text) => ({ text, options: { color: '1E293B', fill: { color: rowIndex % 2 ? 'F1F5F9' : 'FFFFFF' }, fontSize: 8, margin: 0.05, breakLine: false } })),
+            ),
+          ]
+          slide.addTable(tableRows, {
+            x: 0.55,
+            y: 1.35,
+            w: 12.2,
+            colW,
+            rowH: 0.39,
+            border: { type: 'solid', color: 'D7DFEA', pt: 0.5 },
+            fontFace: 'Aptos',
+            fontSize: 8,
+            color: '1E293B',
+            margin: 0.05,
+            valign: 'middle',
+            autoPage: false,
+          })
+        }
+      }
+
+      const cover = pptx.addSlide()
+      cover.background = { color: 'F6F8FC' }
+      cover.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: 13.333, h: 2.05, line: { color: '172554', transparency: 100 }, fill: { color: '172554' } })
+      cover.addText('LINKLYTICS', { x: 0.72, y: 0.48, w: 11.8, h: 0.3, fontFace: 'Aptos', fontSize: 12, bold: true, charSpacing: 2, color: 'A5B4FC', margin: 0 })
+      cover.addText('Analytics & Activity Report', { x: 0.72, y: 0.95, w: 11.8, h: 0.58, fontFace: 'Aptos Display', fontSize: 30, bold: true, color: 'FFFFFF', margin: 0 })
+      cover.addText(`Generated ${new Date().toLocaleString()}${profile.email ? ` for ${profile.email}` : ''}`, { x: 0.75, y: 2.35, w: 11.8, h: 0.3, fontFace: 'Aptos', fontSize: 11, color: '64748B', margin: 0 })
+      const summaryItems = [
+        ['SHORT LINKS', String(links.length)],
+        ['RECORDED CLICKS', String(totalClicks)],
+        ['CAMPAIGNS', String(campaignGroups.length)],
+        ['CLICK EVENTS', String(recordedClicks.length)],
+      ]
+      summaryItems.forEach(([label, value], index) => {
+        const x = 0.75 + index * 3.1
+        cover.addShape(pptx.ShapeType.roundRect, { x, y: 3.1, w: 2.75, h: 1.2, rectRadius: 0.08, line: { color: 'E2E8F0', pt: 1 }, fill: { color: 'FFFFFF' } })
+        cover.addText(label, { x: x + 0.15, y: 3.35, w: 2.45, h: 0.2, fontFace: 'Aptos', fontSize: 9, bold: true, color: '64748B', align: 'center', margin: 0 })
+        cover.addText(value, { x: x + 0.15, y: 3.65, w: 2.45, h: 0.42, fontFace: 'Aptos Display', fontSize: 25, bold: true, color: '312E81', align: 'center', margin: 0 })
+      })
+      cover.addText('Report includes campaign performance, link inventory, click trends, audience breakdowns, and recorded click activity.', { x: 0.78, y: 4.75, w: 11.7, h: 0.5, fontFace: 'Aptos', fontSize: 13, color: '334155', breakLine: false, margin: 0 })
+      cover.addText('Activity detail reflects data currently recorded for links in this workspace. Previously deleted links or actions that were not tracked are not available in this export.', { x: 0.78, y: 5.45, w: 11.7, h: 0.55, fontFace: 'Aptos', fontSize: 10, color: '64748B', breakLine: false, margin: 0 })
+
+      addTableSection(
+        'Campaign performance',
+        'Link and click totals for every available campaign.',
+        ['Campaign', 'Links', 'Clicks', 'Share of clicks'],
+        campaignGroups.map((campaign) => {
+          const campaignClicks = campaign.links.reduce((sum, link) => sum + link.clickCount, 0)
+          return [campaign.name, String(campaign.links.length), String(campaignClicks), totalClicks ? `${((campaignClicks / totalClicks) * 100).toFixed(1)}%` : '0%']
+        }),
+        [5.2, 1.6, 1.8, 3.6],
+      )
+
+      const linkRows = [...links].sort((a, b) => b.clickCount - a.clickCount).map((link) => [
+        link.shortCode,
+        campaignName(link.campaignId),
+        link.shortUrl,
+        link.longUrl,
+        String(link.clickCount),
+        link.status,
+        dateText(link.createdAt),
+      ])
+      addTableSection('Short link inventory', 'All current links, ordered by recorded click count.', ['Code', 'Campaign', 'Short URL', 'Destination', 'Clicks', 'Status', 'Created'], linkRows, [1.05, 1.55, 2.0, 3.5, 0.65, 1.2, 2.25])
+
+      const breakdownRows = [
+        ...breakdown(({ event }) => event.country || 'Unknown').map(([label, count]) => ['Country', label, count]),
+        ...breakdown(({ event }) => event.city || 'Unknown').map(([label, count]) => ['City', label, count]),
+        ...breakdown(({ event }) => event.device || 'Unknown').map(([label, count]) => ['Device', label, count]),
+        ...breakdown(({ event }) => event.browser || 'Unknown').map(([label, count]) => ['Browser', label, count]),
+        ...breakdown(({ event }) => event.os || 'Unknown').map(([label, count]) => ['Operating system', label, count]),
+        ...breakdown(({ event }) => event.referrer || 'Direct').map(([label, count]) => ['Referrer', label, count]),
+        ...breakdown(({ event }) => {
+          const date = new Date(event.createdAt)
+          return Number.isNaN(date.getTime()) ? 'Unknown' : date.toISOString().slice(0, 10)
+        }).map(([label, count]) => ['Date', label, count]),
+      ]
+      addTableSection('Click analytics breakdown', 'Recorded events grouped by date, geography, device, browser, operating system, and referrer.', ['Dimension', 'Value', 'Clicks'], breakdownRows, [3.0, 6.4, 3.2])
+
+      const activityRows = recordedClicks
+        .sort((a, b) => new Date(b.event.createdAt).getTime() - new Date(a.event.createdAt).getTime())
+        .map(({ link, event }) => [
+          link.shortCode,
+          dateText(event.createdAt),
+          [event.city, event.country].filter(Boolean).join(', ') || 'Unknown',
+          [event.device, event.browser, event.os].filter(Boolean).join(' / ') || 'Unknown',
+          event.referrer || 'Direct',
+        ])
+      addTableSection('Recorded click activity', 'One row per click event recorded by Linklytics.', ['Short code', 'Timestamp', 'Location', 'Device / browser / OS', 'Referrer'], activityRows, [1.5, 2.4, 2.5, 3.2, 3.0])
+
+      await pptx.writeFile({ fileName: `linklytics-analytics-${new Date().toISOString().slice(0, 10)}.pptx` })
+      setNotice({ type: 'success', text: 'PowerPoint analytics report downloaded.' })
+    } catch (error) {
+      setNotice({ type: 'error', text: error instanceof Error ? `Could not create PowerPoint report: ${error.message}` : 'Could not create PowerPoint report.' })
+    }
   }
 
   const themeButton = (
@@ -483,7 +624,10 @@ function App() {
               <div className="campaign-card-top">
                 <span className="campaign-icon" style={{ backgroundColor: campaign.color }}><Megaphone size={17} /></span>
                 <div className="campaign-card-actions">
-                  <button type="button" className="more-button" onClick={() => setExpandedCampaign(expandedCampaign === campaign.id ? null : campaign.id)}>{expandedCampaign === campaign.id ? 'Hide links' : 'View links'}</button>
+                  <button type="button" className="more-button" onClick={() => {
+                    setSelectedCampaignId(campaign.id)
+                    setExpandedCampaign(expandedCampaign === campaign.id ? null : campaign.id)
+                  }}>{expandedCampaign === campaign.id ? 'Hide links' : 'View links'}</button>
                   {campaign.id.startsWith('custom-') ? <button type="button" className="icon-action danger" onClick={() => deleteCampaign(campaign.id)} aria-label={`Delete ${campaign.name} campaign`} title="Delete campaign"><Trash2 size={15} /></button> : null}
                 </div>
               </div>
@@ -815,7 +959,7 @@ function App() {
                     <button type="button" className="link-action" onClick={() => openDirectLink(link.shortUrl)}>
                       Open link
                     </button>
-                    <button type="button" className="link-action track-link-action" onClick={() => openTrackedLink(link)}>
+                    <button type="button" className="link-action track-link-action" onClick={() => void trackLink(link)}>
                       Track link
                     </button>
                     </div>
