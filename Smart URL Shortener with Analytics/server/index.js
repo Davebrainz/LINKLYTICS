@@ -4,6 +4,7 @@ import QRCode from 'qrcode';
 import geoip from 'geoip-lite';
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
+import { dateKeyInTimeZone } from './date.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'linklytics_secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/linklytics';
@@ -288,13 +289,14 @@ export async function analytics(request) {
   try {
     const auth = await authorizedUser(request);
     if (auth.response) return auth.response;
+    const timeZone = new URL(request.url).searchParams.get('timeZone') || 'UTC';
     const links = await getUserLinks(String(auth.user._id || auth.user.id));
     const referrers = new Map();
     const daily = new Map();
     links.forEach((link) => link.clickEvents.forEach((event) => {
       const source = event.referrer || 'Direct';
       referrers.set(source, (referrers.get(source) || 0) + 1);
-      const date = new Date(event.createdAt).toISOString().slice(0, 10);
+      const date = dateKeyInTimeZone(event.createdAt, timeZone);
       daily.set(date, (daily.get(date) || 0) + 1);
     }));
     return json({

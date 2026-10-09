@@ -7,6 +7,7 @@ import QRCode from 'qrcode';
 import geoip from 'geoip-lite';
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
+import { dateKeyInTimeZone } from './date.js';
 
 dotenv.config();
 
@@ -447,6 +448,7 @@ app.delete('/api/links/:id', getAuthUser, async (req, res) => {
 
 app.get('/api/analytics', getAuthUser, async (req, res) => {
   try {
+    const timeZone = typeof req.query.timeZone === 'string' ? req.query.timeZone : 'UTC';
     const userId = mongoReady ? req.user._id.toString() : req.user.id;
     const links = await getUserLinks(userId);
     const referrers = new Map();
@@ -455,7 +457,7 @@ app.get('/api/analytics', getAuthUser, async (req, res) => {
     links.forEach((link) => link.clickEvents.forEach((event) => {
       const source = event.referrer || 'Direct';
       referrers.set(source, (referrers.get(source) || 0) + 1);
-      const date = new Date(event.createdAt).toISOString().slice(0, 10);
+      const date = dateKeyInTimeZone(event.createdAt, timeZone);
       daily.set(date, (daily.get(date) || 0) + 1);
     }));
 

@@ -204,28 +204,20 @@ function App() {
   }, [links])
 
   const dailyTraffic = useMemo(() => {
+    const clickCountsByDate = new Map(analyticsData.daily.map(({ date, clicks }) => [date, clicks]))
     const lastSeven = Array.from({ length: 7 }, (_, index) => {
       const date = new Date()
       date.setDate(date.getDate() - (6 - index))
+      const dateKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
       return {
-        date: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
+        date: dateKey,
         day: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-        value: 0,
+        value: clickCountsByDate.get(dateKey) || 0,
       }
     })
 
-    links.forEach((link) => {
-      link.clickEvents.forEach((event) => {
-        const eventDate = new Date(event.createdAt)
-        if (Number.isNaN(eventDate.getTime())) return
-        const eventDateKey = `${eventDate.getFullYear()}-${String(eventDate.getMonth() + 1).padStart(2, '0')}-${String(eventDate.getDate()).padStart(2, '0')}`
-        const item = lastSeven.find((day) => day.date === eventDateKey)
-        if (item) item.value += 1
-      })
-    })
-
     return lastSeven
-  }, [links])
+  }, [analyticsData.daily])
 
   const fetchLatestLinks = async (authToken: string): Promise<UrlLink[]> => {
     const response = await fetch(`${API_BASE}/links`, {
@@ -292,7 +284,8 @@ function App() {
   }
 
   const fetchAnalytics = async (authToken: string) => {
-    const response = await fetch(`${API_BASE}/analytics`, { headers: { Authorization: `Bearer ${authToken}` } })
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const response = await fetch(`${API_BASE}/analytics?timeZone=${encodeURIComponent(timeZone)}`, { headers: { Authorization: `Bearer ${authToken}` } })
     const data = await response.json()
     if (!response.ok) {
       throw new Error(data.message || 'Unable to fetch analytics')
