@@ -143,6 +143,7 @@ function App() {
   }))
   const [isLoading, setIsLoading] = useState(false)
   const [isRefreshingCampaigns, setIsRefreshingCampaigns] = useState(false)
+  const [isRefreshingAnalytics, setIsRefreshingAnalytics] = useState(false)
   const [campaignRefreshError, setCampaignRefreshError] = useState('')
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('linklytics-theme') === 'dark')
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
@@ -206,14 +207,19 @@ function App() {
     const lastSeven = Array.from({ length: 7 }, (_, index) => {
       const date = new Date()
       date.setDate(date.getDate() - (6 - index))
-      return { day: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), value: 0 }
+      return {
+        date: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
+        day: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        value: 0,
+      }
     })
 
     links.forEach((link) => {
       link.clickEvents.forEach((event) => {
         const eventDate = new Date(event.createdAt)
-        const label = eventDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-        const item = lastSeven.find((day) => day.day === label)
+        if (Number.isNaN(eventDate.getTime())) return
+        const eventDateKey = `${eventDate.getFullYear()}-${String(eventDate.getMonth() + 1).padStart(2, '0')}-${String(eventDate.getDate()).padStart(2, '0')}`
+        const item = lastSeven.find((day) => day.date === eventDateKey)
         if (item) item.value += 1
       })
     })
@@ -287,7 +293,26 @@ function App() {
 
   const fetchAnalytics = async (authToken: string) => {
     const response = await fetch(`${API_BASE}/analytics`, { headers: { Authorization: `Bearer ${authToken}` } })
-    if (response.ok) setAnalyticsData(await response.json())
+    const data = await response.json()
+    if (!response.ok) {
+      throw new Error(data.message || 'Unable to fetch analytics')
+    }
+    setAnalyticsData(data)
+  }
+
+  const refreshAnalyticsData = async () => {
+    if (!token) return
+    setIsRefreshingAnalytics(true)
+    try {
+      await retryDeletedLinks(token)
+      const latestLinks = withoutDeletedLinks(await fetchLatestLinks(token))
+      await fetchAnalytics(token)
+      setLinks(latestLinks)
+    } catch (error) {
+      setNotice({ type: 'error', text: error instanceof Error ? error.message : 'Unable to refresh traffic analytics.' })
+    } finally {
+      setIsRefreshingAnalytics(false)
+    }
   }
 
   const updateProfile = (nextProfile: typeof profile) => {
@@ -735,6 +760,9 @@ function App() {
             <h2>Analytics overview</h2>
             <p>Understand what your audience does after every share.</p>
           </div>
+          <button type="button" className="ghost-button" onClick={() => void refreshAnalyticsData()} disabled={isRefreshingAnalytics}>
+            {isRefreshingAnalytics ? 'Refreshing...' : 'Refresh analytics'}
+          </button>
         </div>
         <section className="stats-grid analytics-stats">
           <article className="stat-card">
@@ -900,6 +928,7 @@ function App() {
             return <button key={item.id} className={activePage === item.id? 'nav-item active' : 'nav-item'} type="button" onClick={() => {
               setActivePage(item.id)
               if (item.id === 'campaigns') void refreshCampaignData()
+              if (item.id === 'dashboard' || item.id === 'analytics') void refreshAnalyticsData()
             }}>
               <Icon size={18} />
               <span className="nav-label">{item.label}</span>
@@ -1044,7 +1073,9 @@ function App() {
                 <p className="eyebrow">Traffic</p>
                 <h3>Clicks over time</h3>
               </div>
-              <button type="button" className="ghost-button small">7 days</button>
+              <button type="button" className="ghost-button small" onClick={() => void refreshAnalyticsData()} disabled={isRefreshingAnalytics}>
+                {isRefreshingAnalytics ? 'Refreshing...' : 'Refresh'}
+              </button>
             </div>
 
             <svg viewBox="0 0 280 120" className="line-chart" aria-label="Traffic chart">
