@@ -26,6 +26,7 @@ type UrlLink = {
   longUrl: string
   shortCode: string
   shortUrl: string
+  campaignName?: string
   customSlug?: string
   createdAt: string
   expiresAt?: string
@@ -93,6 +94,15 @@ function ProfileSettings({ profile, onSave, onUpdate }: { profile: Profile; onSa
 
 function App() {
   const [links, setLinks] = useState<UrlLink[]>([])
+  const [campaignLinks, setCampaignLinks] = useState<UrlLink[]>([])
+  const [deletedLinkIds, setDeletedLinkIds] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('linklytics-deleted-links') || '[]')
+      return Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string') : []
+    } catch {
+      return []
+    }
+  })
   const [selectedId, setSelectedId] = useState('')
   const [token, setToken] = useState<string | null>(null)
   const [screen, setScreen] = useState<Screen>('landing')
@@ -132,6 +142,8 @@ function App() {
     pic: localStorage.getItem('linklytics_pic') || '',
   }))
   const [isLoading, setIsLoading] = useState(false)
+  const [isRefreshingCampaigns, setIsRefreshingCampaigns] = useState(false)
+  const [campaignRefreshError, setCampaignRefreshError] = useState('')
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('linklytics-theme') === 'dark')
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [authForm, setAuthForm] = useState({ name: '', email: '', password: '' })
@@ -151,9 +163,17 @@ function App() {
     const totalLinks = links.length
     const totalClicks = links.reduce((sum, link) => sum + link.clickEvents.length, 0)
     const activeLinks = links.filter((link) => link.status === 'Active').length
+    const linksWithClicks = links.filter((link) => link.clickEvents.length > 0).length
     const uniqueCountries = new Set(links.flatMap((link) => link.clickEvents.map((event) => event.country))).size
 
-    return { totalLinks, totalClicks, activeLinks, uniqueCountries }
+    return {
+      totalLinks,
+      totalClicks,
+      activeLinks,
+      uniqueCountries,
+      linksWithClicks,
+      linkClickRate: totalLinks ? Math.round((linksWithClicks / totalLinks) * 100) : 0,
+    }
   }, [links])
 
   const countryBreakdown = useMemo(() => {
@@ -201,19 +221,67 @@ function App() {
     return lastSeven
   }, [links])
 
-  const fetchLinks = async (authToken: string) => {
+  const fetchLatestLinks = async (authToken: string): Promise<UrlLink[]> => {
     const response = await fetch(`${API_BASE}/links`, {
-      headers: {
-        Authorization: `Bearer ${authToken}`,
-      },
+      headers: { Authorization: 'Bearer ' + authToken },
     })
-
+    const result = await response.json()
     if (!response.ok) {
-      throw new Error('Unable to fetch links')
+      throw new Error(result.message || 'Unable to fetch links')
     }
+    if (!Array.isArray(result)) {
+      throw new Error('The server returned an invalid link list.')
+    }
+    return result
+  }
 
-    const data = await response.json()
+  const persistDeletedLinkIds = (ids: string[]) => {
+    setDeletedLinkIds(ids)
+    localStorage.setItem('linklytics-deleted-links', JSON.stringify(ids))
+  }
+
+  const withoutDeletedLinks = (data: UrlLink[]) => data.filter((link) => !deletedLinkIds.includes(link.id))
+
+  const retryDeletedLinks = async (authToken: string, ids: string[] = deletedLinkIds) => {
+    let pendingIds = ids
+    for (const id of ids) {
+      try {
+        const response = await fetch(`${API_BASE}/links/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${authToken}` },
+        })
+        if (!response.ok) continue
+        const savedLinks = await fetchLatestLinks(authToken)
+        if (!savedLinks.some((link) => link.id === id)) {
+          pendingIds = pendingIds.filter((pendingId) => pendingId !== id)
+        }
+      } catch {
+        // Keep failed deletions queued for the next refresh.
+      }
+    }
+    persistDeletedLinkIds(pendingIds)
+    return pendingIds
+  }
+
+  const refreshCampaignData = async () => {
+    if (!token) return
+    setIsRefreshingCampaigns(true)
+    setCampaignRefreshError('')
+    try {
+      await retryDeletedLinks(token)
+      setCampaignLinks(withoutDeletedLinks(await fetchLatestLinks(token)))
+    } catch (error) {
+      setCampaignRefreshError(error instanceof Error ? error.message : 'Unable to refresh campaign links.')
+    } finally {
+      setIsRefreshingCampaigns(false)
+    }
+  }
+
+  const fetchLinks = async (authToken: string) => {
+    await retryDeletedLinks(authToken)
+    const data = withoutDeletedLinks(await fetchLatestLinks(authToken))
     setLinks(data)
+    setCampaignLinks(data)
     if (data[0]) setSelectedId(data[0].id)
   }
 
@@ -303,6 +371,7 @@ function App() {
     localStorage.removeItem('linklytics-token')
     setToken(null)
     setLinks([])
+    setCampaignLinks([])
     setSelectedId('')
     setActivePage('dashboard')
     setScreen('landing')
@@ -334,6 +403,7 @@ function App() {
       body: JSON.stringify({
         longUrl: form.longUrl,
         campaignId: selectedCampaignId,
+        campaignName: campaignGroups.find((campaign) => campaign.id === selectedCampaignId)?.name || selectedCampaignId,
         customSlug: form.customSlug,
         expiresAt: form.expiresAt,
         maxClicks: form.maxClicks? Number(form.maxClicks) : undefined,
@@ -347,10 +417,19 @@ function App() {
       return
     }
 
-    setLinks((current) => [result,...current])
-    setSelectedId(result.id)
-    setNotice({ type: 'success', text: `Short link created: ${result.shortUrl}` })
+    const createdLink = { ...result, campaignId: result.campaignId || selectedCampaignId }
+    setLinks((current) => [createdLink,...current])
+    setCampaignLinks((current) => [createdLink,...current])
+    setSelectedId(createdLink.id)
+    setNotice({ type: 'success', text: `Short link created: ${createdLink.shortUrl}` })
     setForm({ longUrl: '', customSlug: '', expiresAt: '', maxClicks: '' })
+    try {
+      const latestLinks = withoutDeletedLinks(await fetchLatestLinks(token))
+      setLinks(latestLinks)
+      setCampaignLinks(latestLinks)
+    } catch (error) {
+      setCampaignRefreshError(error instanceof Error ? error.message : 'Link created, but campaign data could not be refreshed.')
+    }
   }
 
   const createCampaign = (event: React.FormEvent<HTMLFormElement>) => {
@@ -373,27 +452,34 @@ function App() {
     window.open(longUrl, '_blank', 'noopener,noreferrer')
   }
 
-  const trackLink = async (link: UrlLink) => {
+  const refreshLinkTracking = async (link: UrlLink) => {
     if (!token) {
-      setNotice({ type: 'error', text: 'Please log in again to record this click.' })
+      setNotice({ type: 'error', text: 'Please log in again to view recorded clicks.' })
       return
     }
 
     try {
-      const response = await fetch(`${API_BASE}/links/${encodeURIComponent(link.id)}/click`, {
-        method: 'POST',
+      const response = await fetch(`${API_BASE}/links`, {
+        method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
       })
       const result = await response.json()
       if (!response.ok) {
-        throw new Error(result.message || 'Unable to track this click.')
+        throw new Error(result.message || 'Unable to refresh click tracking.')
       }
 
-      setLinks((current) => current.map((item) => item.id === link.id ? result.link : item))
+      const updatedLink = result.find((item: UrlLink) => item.id === link.id)
+      if (!updatedLink) {
+        throw new Error('Link not found while refreshing click tracking.')
+      }
+
+      const visibleLinks = withoutDeletedLinks(result)
+      setLinks(visibleLinks)
+      setCampaignLinks(visibleLinks)
       await fetchAnalytics(token)
-      setNotice({ type: 'success', text: `Click tracked for ${link.shortUrl}.` })
+      setNotice({ type: 'success', text: `Tracking refreshed for ${link.shortUrl}. Only visits to the short link count.` })
     } catch (error) {
-      setNotice({ type: 'error', text: error instanceof Error ? error.message : 'Unable to track this click.' })
+      setNotice({ type: 'error', text: error instanceof Error ? error.message : 'Unable to refresh click tracking.' })
     }
   }
 
@@ -410,19 +496,36 @@ function App() {
   const analyticsDevices = deviceBreakdown.map(([name, value]) => ({ name, value }))
   const analyticsLinks = links.slice(0, 5).map((link) => ({ name: link.shortCode, clicks: link.clickCount }))
   const referrers = analyticsData.referrers.map((item) => ({ name: item.source, clicks: item.clicks }))
+  const topCountry = countryBreakdown[0]
+  const topDevice = [...deviceBreakdown].sort((a, b) => b[1] - a[1])[0]
   const filteredLinks = links.filter((link) => {
     const matchesSearch = `${link.title} ${link.shortUrl} ${link.longUrl}`.toLowerCase().includes(linkSearch.toLowerCase())
     const matchesFilter = linkFilter === 'All' || link.status === linkFilter
     return matchesSearch && matchesFilter
   })
-  const campaignGroups = [
+  const predefinedCampaigns = [
     { id: 'blackfriday', name: 'Black Friday Sale', color: '#f97316' },
     { id: 'product-launch', name: 'Product Launch', color: '#4f46e5' },
     { id: 'always-on', name: 'Always-on Content', color: '#0d9488' },
     ...customCampaigns,
+  ]
+  const persistedCampaigns = campaignLinks.reduce<{ id: string; name: string; color: string }[]>((campaigns, link) => {
+    if (link.campaignId && !predefinedCampaigns.some((campaign) => campaign.id === link.campaignId) &&
+      !campaigns.some((campaign) => campaign.id === link.campaignId)) {
+      campaigns.push({
+        id: link.campaignId,
+        name: link.campaignName || link.campaignId,
+        color: settings.theme,
+      })
+    }
+    return campaigns
+  }, [])
+  const campaignGroups = [
+    ...predefinedCampaigns,
+    ...persistedCampaigns,
   ].map((campaign) => ({
     ...campaign,
-    links: links.filter((link) => link.campaignId === campaign.id),
+    links: campaignLinks.filter((link) => link.campaignId === campaign.id),
   })).filter((campaign) => !hiddenCampaigns.includes(campaign.id))
 
   const deleteCampaign = (campaignId: string) => {
@@ -437,10 +540,32 @@ function App() {
     setNotice({ type: 'success', text: 'Short link copied to your clipboard.' })
   }
 
-  const deleteLink = (linkId: string) => {
-    setLinks((current) => current.filter((link) => link.id!== linkId))
+  const deleteLink = async (linkId: string) => {
+    const pendingIds = [...new Set([...deletedLinkIds, linkId])]
+    persistDeletedLinkIds(pendingIds)
+    setLinks((current) => current.filter((link) => link.id !== linkId))
+    setCampaignLinks((current) => current.filter((link) => link.id !== linkId))
     if (selectedId === linkId) setSelectedId('')
-    setNotice({ type: 'success', text: 'Link removed from this workspace.' })
+
+    if (!token) return
+    try {
+      const response = await fetch(`${API_BASE}/links/${encodeURIComponent(linkId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) return
+
+      const remainingLinks = await fetchLatestLinks(token)
+      if (remainingLinks.some((link) => link.id === linkId)) return
+      const updatedPendingIds = pendingIds.filter((id) => id !== linkId)
+      persistDeletedLinkIds(updatedPendingIds)
+      const visibleLinks = withoutDeletedLinks(remainingLinks)
+      setLinks(visibleLinks)
+      setCampaignLinks(visibleLinks)
+      await fetchAnalytics(token)
+    } catch {
+      // Keep the local tombstone so the link remains hidden and is retried later.
+    }
   }
 
   const exportAnalytics = async () => {
@@ -603,22 +728,60 @@ function App() {
     }
 
     if (activePage === 'analytics') {
-      return <><div className="page-heading"><div><p className="eyebrow">Performance intelligence</p><h2>Analytics overview</h2><p>Understand what your audience does after every share.</p></div><button type="button" className="ghost-button">Last 7 days</button></div><section className="stats-grid analytics-stats"><article className="stat-card"><span>Total clicks</span><strong>{aggregateStats.totalClicks || '1,284'}</strong><small>+18.6% this week</small></article><article className="stat-card"><span>Top country</span><strong>Nigeria</strong><small>80% of all clicks</small></article><article className="stat-card"><span>Top device</span><strong>Desktop</strong><small>60% of all clicks</small></article><article className="stat-card"><span>Click-through rate</span><strong>18.4%</strong><small>+3.2% from last week</small></article></section><section className="panel chart-panel large-chart"><div className="panel-header"><div><p className="eyebrow">Traffic trend</p><h3>Clicks over last 7 days</h3></div></div><ResponsiveContainer width="100%" height={260}><LineChart data={demoDailyTraffic}><XAxis dataKey="day" /><YAxis /><Tooltip /><Line type="monotone" dataKey="value" stroke="#4f46e5" strokeWidth={3} dot={{ fill: '#fff', stroke: '#4f46e5', strokeWidth: 2, r: 4 }} /></LineChart></ResponsiveContainer></section><section className="analytics-cards"><article className="panel chart-panel"><div className="panel-header"><div><p className="eyebrow">Audience</p><h3>Device Breakdown</h3></div></div><ResponsiveContainer width="100%" height={230}><PieChart><Pie data={analyticsDevices} dataKey="value" nameKey="name" cx="50%" cy="48%" innerRadius={55} outerRadius={82} paddingAngle={4}>{analyticsDevices.map((entry, index) => <Cell key={entry.name} fill={['#4f46e5', '#14b8a6', '#f59e0b'][index]} />)}</Pie><Tooltip /><Legend /></PieChart></ResponsiveContainer></article><article className="panel chart-panel"><div className="panel-header"><div><p className="eyebrow">Leaders</p><h3>Top 5 Performing Links</h3></div></div><ResponsiveContainer width="100%" height={230}><BarChart data={analyticsLinks} layout="vertical" margin={{ left: 12, right: 16 }}><XAxis type="number" hide /><YAxis dataKey="name" type="category" width={90} /><Tooltip /><Bar dataKey="clicks" fill="#4f46e5" radius={[0, 5, 5, 0]} /></BarChart></ResponsiveContainer></article></section><section className="panel table-panel"><div className="panel-header"><div><p className="eyebrow">Acquisition</p><h3>Referrer table</h3></div></div><table><thead><tr><th>Source</th><th>Clicks</th><th>Share</th></tr></thead><tbody>{referrers.map((referrer) => <tr key={referrer.name}><td><strong>{referrer.name}</strong></td><td>{referrer.clicks}</td><td><div className="referrer-share"><span style={{ width: `${(referrer.clicks / referrers[0].clicks) * 100}%` }} /></div></td></tr>)}</tbody></table></section></>
+      return <>
+        <div className="page-heading">
+          <div>
+            <p className="eyebrow">Performance intelligence</p>
+            <h2>Analytics overview</h2>
+            <p>Understand what your audience does after every share.</p>
+          </div>
+        </div>
+        <section className="stats-grid analytics-stats">
+          <article className="stat-card">
+            <span>Total clicks</span>
+            <strong>{aggregateStats.totalClicks}</strong>
+            <small>Recorded short-link visits</small>
+          </article>
+          <article className="stat-card">
+            <span>Top country</span>
+            <strong>{topCountry?.[0] || '—'}</strong>
+            <small>{topCountry ? `${topCountry[1]} recorded clicks` : 'No recorded clicks yet'}</small>
+          </article>
+          <article className="stat-card">
+            <span>Top device</span>
+            <strong>{topDevice?.[0] || '—'}</strong>
+            <small>{topDevice ? `${topDevice[1]} recorded clicks` : 'No recorded clicks yet'}</small>
+          </article>
+          <article className="stat-card">
+            <span>Links with clicks</span>
+            <strong>{aggregateStats.linksWithClicks} / {aggregateStats.totalLinks}</strong>
+            <small>{aggregateStats.linkClickRate}% of created links have at least one recorded click; impressions are not tracked.</small>
+          </article>
+        </section>
+        {campaignRefreshError ? <div className="notice error">{campaignRefreshError}</div> : null}
+        <section className="panel chart-panel large-chart"><div className="panel-header"><div><p className="eyebrow">Traffic trend</p><h3>Clicks over last 7 days</h3></div></div><ResponsiveContainer width="100%" height={260}><LineChart data={demoDailyTraffic}><XAxis dataKey="day" /><YAxis /><Tooltip /><Line type="monotone" dataKey="value" stroke="#4f46e5" strokeWidth={3} dot={{ fill: '#fff', stroke: '#4f46e5', strokeWidth: 2, r: 4 }} /></LineChart></ResponsiveContainer></section><section className="analytics-cards"><article className="panel chart-panel"><div className="panel-header"><div><p className="eyebrow">Audience</p><h3>Device Breakdown</h3></div></div><ResponsiveContainer width="100%" height={230}><PieChart><Pie data={analyticsDevices} dataKey="value" nameKey="name" cx="50%" cy="48%" innerRadius={55} outerRadius={82} paddingAngle={4}>{analyticsDevices.map((entry, index) => <Cell key={entry.name} fill={['#4f46e5', '#14b8a6', '#f59e0b'][index]} />)}</Pie><Tooltip /><Legend /></PieChart></ResponsiveContainer></article><article className="panel chart-panel"><div className="panel-header"><div><p className="eyebrow">Leaders</p><h3>Top 5 Performing Links</h3></div></div><ResponsiveContainer width="100%" height={230}><BarChart data={analyticsLinks} layout="vertical" margin={{ left: 12, right: 16 }}><XAxis type="number" hide /><YAxis dataKey="name" type="category" width={90} /><Tooltip /><Bar dataKey="clicks" fill="#4f46e5" radius={[0, 5, 5, 0]} /></BarChart></ResponsiveContainer></article></section><section className="panel table-panel"><div className="panel-header"><div><p className="eyebrow">Acquisition</p><h3>Referrer table</h3></div></div><table><thead><tr><th>Source</th><th>Clicks</th><th>Share</th></tr></thead><tbody>{referrers.map((referrer) => <tr key={referrer.name}><td><strong>{referrer.name}</strong></td><td>{referrer.clicks}</td><td><div className="referrer-share"><span style={{ width: `${(referrer.clicks / referrers[0].clicks) * 100}%` }} /></div></td></tr>)}</tbody></table></section>
+      </>
     }
 
     if (activePage === 'campaigns') {
       return <>
         <div className="page-heading">
           <div><p className="eyebrow">Organize your growth</p><h2>Campaigns</h2><p>Group related links and track the momentum of every initiative.</p></div>
-          <button type="button" className="primary-button" onClick={() => setIsCreatingCampaign((current) => !current)}>{isCreatingCampaign ? 'Cancel' : '+ New Campaign'}</button>
+          <div className="page-heading-actions">
+            <button type="button" className="ghost-button" onClick={() => void refreshCampaignData()} disabled={isRefreshingCampaigns}>
+              {isRefreshingCampaigns ? 'Refreshing...' : 'Refresh data'}
+            </button>
+            <button type="button" className="primary-button" onClick={() => setIsCreatingCampaign((current) => !current)}>{isCreatingCampaign ? 'Cancel' : '+ New Campaign'}</button>
+          </div>
         </div>
+        {campaignRefreshError ? <div className="notice error">{campaignRefreshError}</div> : null}
         {isCreatingCampaign ? <form className="campaign-create-form" onSubmit={createCampaign}>
           <label htmlFor="campaign-name">Campaign title<input id="campaign-name" autoFocus maxLength={60} placeholder="Name this campaign" value={campaignName} onChange={(event) => setCampaignName(event.target.value)} required /></label>
           <button type="submit" className="primary-button">Create campaign</button>
         </form> : null}
         <section className="campaign-grid">
           {campaignGroups.map((campaign) => {
-            const clicks = campaign.links.reduce((sum, link) => sum + link.clickCount, 0)
+            const clicks = campaign.links.reduce((sum, link) => sum + link.clickEvents.length, 0)
             const progress = Math.min(100, Math.round(clicks / 20))
             return <article className="campaign-card" key={campaign.id}>
               <div className="campaign-card-top">
@@ -636,7 +799,7 @@ function App() {
               <div className="progress-track"><span style={{ width: `${progress}%`, backgroundColor: campaign.color }} /></div>
               <small>{progress}% of monthly goal</small>
               {expandedCampaign === campaign.id ? <div className="campaign-links">
-                {campaign.links.length > 0 ? campaign.links.map((link) => <div key={link.id}><Link2 size={14} /><span>{link.shortUrl}</span><strong>{link.clickCount} clicks</strong></div>) : <p>No links in this campaign yet.</p>}
+                {campaign.links.length > 0 ? campaign.links.map((link) => <div key={link.id}><Link2 size={14} /><span>{link.shortUrl}</span><strong>{link.clickEvents.length} clicks</strong><button type="button" className="icon-action danger" onClick={() => void deleteLink(link.id)} aria-label={`Delete link ${link.shortCode}`} title="Delete link"><Trash2 size={14} /></button></div>) : <p>No links in this campaign yet.</p>}
               </div> : null}
             </article>
           })}
@@ -734,7 +897,10 @@ function App() {
         <nav className="nav-menu">
           {navItems.map((item) => {
             const Icon = item.icon
-            return <button key={item.id} className={activePage === item.id? 'nav-item active' : 'nav-item'} type="button" onClick={() => setActivePage(item.id)}>
+            return <button key={item.id} className={activePage === item.id? 'nav-item active' : 'nav-item'} type="button" onClick={() => {
+              setActivePage(item.id)
+              if (item.id === 'campaigns') void refreshCampaignData()
+            }}>
               <Icon size={18} />
               <span className="nav-label">{item.label}</span>
             </button>
@@ -759,6 +925,7 @@ function App() {
           <Header isDarkMode={isDarkMode} onToggleTheme={() => setIsDarkMode((current) =>!current)} onCreateLink={() => { setActivePage('dashboard'); setTimeout(() => document.querySelector<HTMLInputElement>('.shorten-form input')?.focus(), 0) }} onExport={exportAnalytics} onLogout={logout} />
         </header>
 
+        {activePage !== 'dashboard' && notice ? <div className={`notice ${notice.type}`}>{notice.text}</div> : null}
         {activePage!== 'dashboard'? renderPage() : null}
 
         {activePage === 'dashboard'? <>
@@ -864,9 +1031,9 @@ function App() {
             <small>{aggregateStats.uniqueCountries} countries reached</small>
           </article>
           <article className="stat-card">
-            <span>Conversion rate</span>
-            <strong>18.4%</strong>
-            <small>Average campaign CTR</small>
+            <span>Links with clicks</span>
+            <strong>{aggregateStats.linksWithClicks} / {aggregateStats.totalLinks}</strong>
+            <small>{aggregateStats.linkClickRate}% of created links have a recorded click</small>
           </article>
         </section>
 
@@ -959,7 +1126,7 @@ function App() {
                     <button type="button" className="link-action" onClick={() => openDirectLink(link.shortUrl)}>
                       Open link
                     </button>
-                    <button type="button" className="link-action track-link-action" onClick={() => void trackLink(link)}>
+                    <button type="button" className="link-action track-link-action" onClick={() => void refreshLinkTracking(link)}>
                       Track link
                     </button>
                     </div>

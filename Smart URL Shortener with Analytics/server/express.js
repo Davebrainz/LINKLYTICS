@@ -55,6 +55,7 @@ const linkSchema = new mongoose.Schema({
   customSlug: { type: String, unique: true, sparse: true },
   shortUrl: { type: String, required: true, unique: true },
   campaignId: String,
+  campaignName: String,
   expiresAt: Date,
   maxClicks: Number,
   clickCount: { type: Number, default: 0 },
@@ -101,6 +102,7 @@ const normalizeLinkDocument = (link) => ({
   shortCode: link.shortCode,
   shortUrl: link.shortUrl,
   campaignId: link.campaignId,
+  campaignName: link.campaignName,
   customSlug: link.customSlug,
   expiresAt: link.expiresAt,
   maxClicks: link.maxClicks,
@@ -199,10 +201,12 @@ const formatLinkForClient = (link, clickList = []) => ({
   longUrl: link.longUrl,
   shortCode: link.shortCode,
   shortUrl: link.shortUrl,
+  campaignId: link.campaignId,
+  campaignName: link.campaignName,
   customSlug: link.customSlug,
   expiresAt: link.expiresAt,
   maxClicks: link.maxClicks,
-  clickCount: clickList.length || link.clickCount || 0,
+  clickCount: clickList.length,
   status: link.status || 'Active',
   clickEvents: clickList.map((event) => ({
     id: event._id ? String(event._id) : event.id,
@@ -329,7 +333,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.post('/api/links', getAuthUser, async (req, res) => {
   try {
-    const { longUrl, customSlug, expiresAt, maxClicks, title, campaignId } = req.body;
+    const { longUrl, customSlug, expiresAt, maxClicks, title, campaignId, campaignName } = req.body;
 
     if (!longUrl) {
       return res.status(400).json({ message: 'longUrl is required' });
@@ -359,6 +363,7 @@ app.post('/api/links', getAuthUser, async (req, res) => {
         customSlug: finalSlug.toLowerCase(),
         shortUrl,
         campaignId,
+        campaignName,
         expiresAt: expiresAt ? new Date(expiresAt) : undefined,
         maxClicks: maxClicks ? Number(maxClicks) : undefined,
         clickCount: 0,
@@ -390,6 +395,7 @@ app.post('/api/links', getAuthUser, async (req, res) => {
       customSlug: finalSlug.toLowerCase(),
       shortUrl,
       campaignId,
+      campaignName,
       expiresAt: expiresAt ? new Date(expiresAt).toISOString() : undefined,
       maxClicks: maxClicks ? Number(maxClicks) : undefined,
       clickCount: 0,
@@ -413,6 +419,29 @@ app.get('/api/links', getAuthUser, async (req, res) => {
     return res.json(links);
   } catch (error) {
     return res.status(500).json({ message: 'Failed to fetch links', error: error.message });
+  }
+});
+
+app.delete('/api/links/:id', getAuthUser, async (req, res) => {
+  try {
+    if (mongoReady) {
+      if (!mongoose.isValidObjectId(req.params.id)) return res.json({ message: 'Link already deleted' });
+      const link = await Link.findOne({ _id: req.params.id, userId: req.user._id });
+      if (!link) return res.json({ message: 'Link already deleted' });
+      await Click.deleteMany({ linkId: link._id });
+      await Link.deleteOne({ _id: link._id });
+      return res.json({ message: 'Link and click history deleted' });
+    }
+
+    const linkIndex = inMemoryLinks.findIndex((link) => link.id === req.params.id && link.userId === req.user.id);
+    if (linkIndex === -1) return res.json({ message: 'Link already deleted' });
+    inMemoryLinks.splice(linkIndex, 1);
+    for (let index = inMemoryClicks.length - 1; index >= 0; index -= 1) {
+      if (inMemoryClicks[index].linkId === req.params.id) inMemoryClicks.splice(index, 1);
+    }
+    return res.json({ message: 'Link and click history deleted' });
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to delete link', error: error.message });
   }
 });
 
@@ -513,77 +542,12 @@ app.get('/:slug', async (req, res) => {
 
 app.post('/api/links/:id/click', getAuthUser, async (req, res) => {
   try {
-    if (mongoReady) {
-      const link = await Link.findById(req.params.id);
-      if (!link) {
-        return res.status(404).json({ message: 'Link not found' });
-      }
-
-      const now = new Date();
-      if (link.expiresAt && now > new Date(link.expiresAt)) {
-        link.status = 'Expired';
-        await link.save();
-        return res.status(400).json({ message: 'This link has expired', link: { id: link._id, status: 'Expired' } });
-      }
-
-      if (link.maxClicks && link.clickCount >= link.maxClicks) {
-        link.status = 'Limit Reached';
-        await link.save();
-        return res.status(400).json({ message: 'Click limit reached', link: { id: link._id, status: 'Limit Reached' } });
-      }
-
-      const ua = parseUserAgent(req.headers['user-agent']);
-      const click = await Click.create({
-        linkId: link._id,
-        country: 'Nigeria',
-        city: 'Lagos',
-        device: ua.device,
-        browser: ua.browser,
-        os: ua.os,
-        timestamp: new Date(),
-      });
-
-      link.clickCount += 1;
-      link.clickEvents.push(click._id);
-      link.status = link.maxClicks && link.clickCount >= link.maxClicks ? 'Limit Reached' : 'Active';
-      await link.save();
-
-      const updatedClicks = await Click.find({ linkId: link._id }).sort({ timestamp: -1 }).lean();
-      return res.json({ message: 'Click tracked successfully', link: formatLinkForClient(link, updatedClicks) });
-    }
-
-    const link = inMemoryLinks.find((item) => item.id === req.params.id);
+    const userId = mongoReady ? req.user._id.toString() : req.user.id;
+    const link = (await getUserLinks(userId)).find((item) => item.id === req.params.id);
     if (!link) return res.status(404).json({ message: 'Link not found' });
-
-    if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
-      link.status = 'Expired';
-      return res.status(400).json({ message: 'This link has expired', link: { id: link.id, status: 'Expired' } });
-    }
-
-    if (link.maxClicks && link.clickCount >= link.maxClicks) {
-      link.status = 'Limit Reached';
-      return res.status(400).json({ message: 'Click limit reached', link: { id: link.id, status: 'Limit Reached' } });
-    }
-
-    const ua = parseUserAgent(req.headers['user-agent']);
-    const clickEvent = {
-      id: randomUUID(),
-      linkId: link.id,
-      country: 'Nigeria',
-      city: 'Lagos',
-      device: ua.device,
-      browser: ua.browser,
-      os: ua.os,
-      timestamp: new Date().toISOString(),
-    };
-
-    inMemoryClicks.unshift(clickEvent);
-    link.clickCount = (link.clickCount || 0) + 1;
-    link.status = link.maxClicks && link.clickCount >= link.maxClicks ? 'Limit Reached' : 'Active';
-
-    return res.json({ message: 'Click tracked successfully', link: formatLinkForClient(link, inMemoryClicks.filter((event) => event.linkId === link.id)) });
+    return res.json({ message: 'Tracking refreshed', link });
   } catch (error) {
-    return res.status(500).json({ message: 'Failed to track click', error: error.message });
+    return res.status(500).json({ message: 'Failed to refresh tracking', error: error.message });
   }
 });
 

@@ -43,6 +43,7 @@ const linkSchema = new mongoose.Schema({
   customSlug: { type: String, unique: true, sparse: true },
   shortUrl: { type: String, required: true, unique: true },
   campaignId: String,
+  campaignName: String,
   expiresAt: Date,
   maxClicks: Number,
   clickCount: { type: Number, default: 0 },
@@ -123,10 +124,11 @@ function formatLink(link, clickList = []) {
     shortCode: link.shortCode,
     shortUrl: link.shortUrl,
     campaignId: link.campaignId,
+    campaignName: link.campaignName,
     customSlug: link.customSlug,
     expiresAt: link.expiresAt,
     maxClicks: link.maxClicks,
-    clickCount: clickList.length || link.clickCount || 0,
+    clickCount: clickList.length,
     status: link.status || 'Active',
     clickEvents: clickList.map((event) => ({
       id: event._id ? String(event._id) : event.id,
@@ -219,11 +221,37 @@ export async function listLinks(request) {
   }
 }
 
+export async function deleteLink(request, { params }) {
+  try {
+    const auth = await authorizedUser(request);
+    if (auth.response) return auth.response;
+    const { id } = await params;
+    const userId = String(auth.user._id || auth.user.id);
+
+    if (state.mongoReady) {
+      if (!mongoose.isValidObjectId(id)) return json({ message: 'Link already deleted' });
+      const link = await Link.findOne({ _id: id, userId });
+      if (!link) return json({ message: 'Link already deleted' });
+      await Click.deleteMany({ linkId: link._id });
+      await Link.deleteOne({ _id: link._id });
+      return json({ message: 'Link and click history deleted' });
+    }
+
+    const index = state.links.findIndex((link) => link.id === id && link.userId === userId);
+    if (index === -1) return json({ message: 'Link already deleted' });
+    state.links.splice(index, 1);
+    state.clicks = state.clicks.filter((click) => click.linkId !== id);
+    return json({ message: 'Link and click history deleted' });
+  } catch (error) {
+    return json({ message: 'Failed to delete link', error: errorMessage(error) }, 500);
+  }
+}
+
 export async function createLink(request) {
   try {
     const auth = await authorizedUser(request);
     if (auth.response) return auth.response;
-    const { longUrl, customSlug, expiresAt, maxClicks, title, campaignId } = await request.json();
+    const { longUrl, customSlug, expiresAt, maxClicks, title, campaignId, campaignName } = await request.json();
     if (!longUrl) return json({ message: 'longUrl is required' }, 400);
     if (typeof campaignId !== 'string' || !campaignId.trim()) {
       return json({ message: 'Select a campaign before creating a link.' }, 400);
@@ -239,7 +267,7 @@ export async function createLink(request) {
     const qrCode = await QRCode.toDataURL(shortUrl);
     const values = {
       title: title || 'Campaign Link', longUrl: normalizedUrl, shortCode, customSlug: slug, shortUrl,
-      campaignId,
+      campaignId, campaignName,
       expiresAt: expiresAt ? new Date(expiresAt) : undefined,
       maxClicks: maxClicks ? Number(maxClicks) : undefined,
       clickCount: 0, status: 'Active', qrCode, clickEvents: [],
@@ -283,36 +311,12 @@ export async function trackClick(request, { params }) {
     const auth = await authorizedUser(request);
     if (auth.response) return auth.response;
     const { id } = await params;
-    const link = state.mongoReady ? await Link.findById(id) : state.links.find((item) => item.id === id);
-    if (!link || String(link.userId) !== String(auth.user._id || auth.user.id)) return json({ message: 'Link not found' }, 404);
-    if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
-      link.status = 'Expired';
-      if (state.mongoReady) await link.save();
-      return json({ message: 'This link has expired', link: { id, status: 'Expired' } }, 400);
-    }
-    if (link.maxClicks && link.clickCount >= link.maxClicks) {
-      link.status = 'Limit Reached';
-      if (state.mongoReady) await link.save();
-      return json({ message: 'Click limit reached', link: { id, status: 'Limit Reached' } }, 400);
-    }
-    const agent = parseUserAgent(request.headers.get('user-agent') || '');
-    let clicks;
-    if (state.mongoReady) {
-      const click = await Click.create({ linkId: link._id, country: 'Nigeria', city: 'Lagos', ...agent });
-      link.clickCount += 1;
-      link.clickEvents.push(click._id);
-      link.status = link.maxClicks && link.clickCount >= link.maxClicks ? 'Limit Reached' : 'Active';
-      await link.save();
-      clicks = await Click.find({ linkId: link._id }).sort({ timestamp: -1 }).lean();
-    } else {
-      state.clicks.unshift({ id: randomUUID(), linkId: link.id, country: 'Nigeria', city: 'Lagos', ...agent, timestamp: new Date().toISOString() });
-      link.clickCount += 1;
-      link.status = link.maxClicks && link.clickCount >= link.maxClicks ? 'Limit Reached' : 'Active';
-      clicks = state.clicks.filter((event) => event.linkId === link.id);
-    }
-    return json({ message: 'Click tracked successfully', link: formatLink(link, clicks) });
+    const links = await getUserLinks(String(auth.user._id || auth.user.id));
+    const link = links.find((item) => item.id === id);
+    if (!link) return json({ message: 'Link not found' }, 404);
+    return json({ message: 'Tracking refreshed', link });
   } catch (error) {
-    return json({ message: 'Failed to track click', error: errorMessage(error) }, 500);
+    return json({ message: 'Failed to refresh tracking', error: errorMessage(error) }, 500);
   }
 }
 
