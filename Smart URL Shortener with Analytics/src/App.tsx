@@ -46,6 +46,17 @@ type AnalyticsData = {
 type Screen = 'landing' | 'auth' | 'dashboard'
 type Page = 'dashboard' | 'links' | 'analytics' | 'campaigns' | 'settings'
 
+const localDateKey = (date: Date, timeZone: string) => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date)
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]))
+  return `${values.year}-${values.month}-${values.day}`
+}
+
 const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'links', label: 'Links', icon: Link2 },
@@ -204,20 +215,29 @@ function App() {
   }, [links])
 
   const dailyTraffic = useMemo(() => {
-    const clickCountsByDate = new Map(analyticsData.daily.map(({ date, clicks }) => [date, clicks]))
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    const clickCountsByDate = new Map<string, number>()
+    links.forEach((link) => {
+      link.clickEvents.forEach((event) => {
+        const timestamp = new Date(event.createdAt)
+        if (Number.isNaN(timestamp.getTime())) return
+        const date = localDateKey(timestamp, timeZone)
+        clickCountsByDate.set(date, (clickCountsByDate.get(date) || 0) + 1)
+      })
+    })
     const lastSeven = Array.from({ length: 7 }, (_, index) => {
       const date = new Date()
       date.setDate(date.getDate() - (6 - index))
-      const dateKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+      const dateKey = localDateKey(date, timeZone)
       return {
         date: dateKey,
-        day: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        day: date.toLocaleDateString('en-US', { timeZone, month: 'short', day: 'numeric' }),
         value: clickCountsByDate.get(dateKey) || 0,
       }
     })
 
     return lastSeven
-  }, [analyticsData.daily])
+  }, [links])
 
   const fetchLatestLinks = async (authToken: string): Promise<UrlLink[]> => {
     const response = await fetch(`${API_BASE}/links`, {

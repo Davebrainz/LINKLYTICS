@@ -1,10 +1,10 @@
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import QRCode from 'qrcode';
-import geoip from 'geoip-lite';
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
 import { dateKeyInTimeZone } from './date.js';
+import { getClientIpAddress, getVisitorLocation, parseUserAgent } from './visitor.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'linklytics_secret_key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/linklytics';
@@ -97,24 +97,6 @@ function generateToken(user) {
 
 function generateShortCode() {
   return `${Math.random().toString(36).slice(2, 8).toUpperCase()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
-}
-
-function parseUserAgent(userAgent = '') {
-  const ua = userAgent.toLowerCase();
-  let browser = 'Unknown';
-  let device = 'Desktop';
-  let os = 'Unknown';
-  if (ua.includes('chrome') && !ua.includes('edg')) browser = 'Chrome';
-  else if (ua.includes('firefox')) browser = 'Firefox';
-  else if (ua.includes('safari')) browser = 'Safari';
-  else if (ua.includes('edg')) browser = 'Edge';
-  if (/android/.test(ua)) os = 'Android';
-  else if (/iphone|ipad|ipod/.test(ua)) os = 'iOS';
-  else if (/windows/.test(ua)) os = 'Windows';
-  else if (/mac os/.test(ua)) os = 'macOS';
-  if (/mobile|android|iphone/.test(ua)) device = 'Mobile';
-  else if (/ipad|tablet/.test(ua)) device = 'Tablet';
-  return { browser, device, os };
 }
 
 function formatLink(link, clickList = []) {
@@ -337,11 +319,11 @@ export async function redirectShortLink(request, { params }) {
     if (!link) return json({ message: 'Short link not found' }, 404);
     if (link.expiresAt && new Date(link.expiresAt) < new Date()) return json({ message: 'This link has expired' }, 410);
     if (link.maxClicks && link.clickCount >= link.maxClicks) return json({ message: 'Click limit reached' }, 410);
-    const address = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '127.0.0.1';
-    const geo = geoip.lookup(address.replace('::ffff:', '')) || {};
+    const address = getClientIpAddress(request.headers, '127.0.0.1');
+    const location = getVisitorLocation(address);
     const agent = parseUserAgent(request.headers.get('user-agent') || '');
     const click = {
-      linkId: link._id || link.id, country: geo.country || 'Unknown', city: geo.city || 'Unknown', ...agent,
+      linkId: link._id || link.id, country: location.country, city: location.city, ...agent,
       referrer: request.headers.get('referer') || 'Direct', ipAddress: address, timestamp: new Date(),
     };
     if (state.mongoReady) {

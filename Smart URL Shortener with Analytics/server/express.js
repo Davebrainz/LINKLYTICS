@@ -4,10 +4,10 @@ import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import QRCode from 'qrcode';
-import geoip from 'geoip-lite';
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
 import { dateKeyInTimeZone } from './date.js';
+import { getClientIpAddress, getVisitorLocation, parseUserAgent } from './visitor.js';
 
 dotenv.config();
 
@@ -73,28 +73,6 @@ const Link = mongoose.models.Link || mongoose.model('Link', linkSchema);
 const generateToken = (user) => jwt.sign({ userId: user._id || user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
 
 const generateShortCode = () => `${Math.random().toString(36).slice(2, 8).toUpperCase()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
-
-const parseUserAgent = (userAgent = '') => {
-  const ua = userAgent.toLowerCase();
-  let browser = 'Unknown';
-  let device = 'Desktop';
-  let os = 'Unknown';
-
-  if (ua.includes('chrome') && !ua.includes('edg')) browser = 'Chrome';
-  else if (ua.includes('firefox')) browser = 'Firefox';
-  else if (ua.includes('safari')) browser = 'Safari';
-  else if (ua.includes('edg')) browser = 'Edge';
-
-  if (/android/.test(ua)) os = 'Android';
-  else if (/iphone|ipad|ipod/.test(ua)) os = 'iOS';
-  else if (/windows/.test(ua)) os = 'Windows';
-  else if (/mac os/.test(ua)) os = 'macOS';
-
-  if (/mobile|android|iphone/.test(ua)) device = 'Mobile';
-  else if (/ipad|tablet/.test(ua)) device = 'Tablet';
-
-  return { browser, device, os };
-};
 
 const normalizeLinkDocument = (link) => ({
   id: link._id ? String(link._id) : link.id,
@@ -493,16 +471,16 @@ app.get('/:slug', async (req, res) => {
       return res.status(410).json({ message: 'Click limit reached' });
     }
 
-    const ipAddress = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
-    const geo = geoip.lookup(Array.isArray(ipAddress) ? ipAddress[0].replace('::ffff:', '') : ipAddress.replace('::ffff:', '')) || {};
+    const ipAddress = getClientIpAddress(req, req.ip || req.socket.remoteAddress || '');
+    const location = getVisitorLocation(ipAddress);
     const ua = parseUserAgent(req.headers['user-agent']);
     const referrer = req.headers.referer || req.headers.referrer || 'Direct';
 
     if (mongoReady) {
       const click = await Click.create({
         linkId: link._id,
-        country: geo.country || 'Unknown',
-        city: geo.city || 'Unknown',
+        country: location.country,
+        city: location.city,
         device: ua.device,
         browser: ua.browser,
         os: ua.os,
@@ -523,8 +501,8 @@ app.get('/:slug', async (req, res) => {
     const clickEvent = {
       id: randomUUID(),
       linkId: link.id,
-      country: geo.country || 'Nigeria',
-      city: geo.city || 'Lagos',
+      country: location.country,
+      city: location.city,
       device: ua.device,
       browser: ua.browser,
       os: ua.os,
