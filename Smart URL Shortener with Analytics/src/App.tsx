@@ -38,6 +38,11 @@ type UrlLink = {
   qrCode?: string
 }
 
+const getLinkStatus = (link: UrlLink, now: number): UrlLink['status'] => {
+  const expiresAt = link.expiresAt ? new Date(link.expiresAt).getTime() : Number.NaN
+  return Number.isFinite(expiresAt) && expiresAt <= now ? 'Expired' : link.status
+}
+
 type AnalyticsData = {
   referrers: { source: string; clicks: number }[]
   daily: { date: string; clicks: number }[]
@@ -167,6 +172,21 @@ function App() {
     maxClicks: '',
   })
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [currentTime, setCurrentTime] = useState(() => Date.now())
+
+  useEffect(() => {
+    const nextExpiry = links.reduce<number | null>((next, link) => {
+      const expiresAt = link.expiresAt ? new Date(link.expiresAt).getTime() : Number.NaN
+      return Number.isFinite(expiresAt) && expiresAt > currentTime && (next === null || expiresAt < next)
+        ? expiresAt
+        : next
+    }, null)
+
+    if (nextExpiry === null) return
+
+    const timeout = window.setTimeout(() => setCurrentTime(Date.now()), Math.min(nextExpiry - currentTime, 2_147_483_647))
+    return () => window.clearTimeout(timeout)
+  }, [currentTime, links])
 
   const selectedLink = links.find((link) => link.id === selectedId)?? links[0]
   const qrSelectedLink = links.find((link) => link.shortUrl === qrLink)
@@ -174,7 +194,7 @@ function App() {
   const aggregateStats = useMemo(() => {
     const totalLinks = links.length
     const totalClicks = links.reduce((sum, link) => sum + link.clickEvents.length, 0)
-    const activeLinks = links.filter((link) => link.status === 'Active').length
+    const activeLinks = links.filter((link) => getLinkStatus(link, currentTime) === 'Active').length
     const linksWithClicks = links.filter((link) => link.clickEvents.length > 0).length
     const uniqueCountries = new Set(links.flatMap((link) => link.clickEvents.map((event) => event.country))).size
 
@@ -186,7 +206,7 @@ function App() {
       linksWithClicks,
       linkClickRate: totalLinks ? Math.round((linksWithClicks / totalLinks) * 100) : 0,
     }
-  }, [links])
+  }, [currentTime, links])
 
   const countryBreakdown = useMemo(() => {
     const map = new Map<string, number>()
@@ -538,7 +558,7 @@ function App() {
   const topDevice = [...deviceBreakdown].sort((a, b) => b[1] - a[1])[0]
   const filteredLinks = links.filter((link) => {
     const matchesSearch = `${link.title} ${link.shortUrl} ${link.longUrl}`.toLowerCase().includes(linkSearch.toLowerCase())
-    const matchesFilter = linkFilter === 'All' || link.status === linkFilter
+    const matchesFilter = linkFilter === 'All' || getLinkStatus(link, currentTime) === linkFilter
     return matchesSearch && matchesFilter
   })
   const predefinedCampaigns = [
@@ -713,7 +733,7 @@ function App() {
         link.shortUrl,
         link.longUrl,
         String(link.clickCount),
-        link.status,
+        getLinkStatus(link, currentTime),
         dateText(link.createdAt),
       ])
       addTableSection('Short link inventory', 'All current links, ordered by recorded click count.', ['Code', 'Campaign', 'Short URL', 'Destination', 'Clicks', 'Status', 'Created'], linkRows, [1.05, 1.55, 2.0, 3.5, 0.65, 1.2, 2.25])
@@ -760,8 +780,8 @@ function App() {
     if (activePage === 'links') {
       return <>
         <div className="page-heading"><div><p className="eyebrow">Workspace library</p><h2>All shortened links</h2><p>Search, filter, and manage every link in one place.</p></div><button type="button" className="primary-button" onClick={() => { setActivePage('dashboard'); setTimeout(() => document.querySelector('.shorten-form input')?.scrollIntoView({ behavior: 'smooth' }), 0) }}>Create link</button></div>
-        <section className="stats-grid compact-stats"><article className="stat-card"><span>Total links</span><strong>{links.length}</strong><small>Across your workspace</small></article><article className="stat-card"><span>Active</span><strong>{links.filter((link) => link.status === 'Active').length}</strong><small>Ready to share</small></article><article className="stat-card"><span>Expired</span><strong>{links.filter((link) => link.status === 'Expired' || (link.expiresAt && new Date(link.expiresAt) <= new Date())).length}</strong><small>Need attention</small></article></section>
-        <section className="panel links-library"><div className="library-toolbar"><label className="search-field"><Search size={17} /><input placeholder="Search links..." value={linkSearch} onChange={(event) => setLinkSearch(event.target.value)} /></label><div className="filter-tabs">{(['All', 'Active', 'Expired'] as const).map((filter) => <button key={filter} type="button" className={linkFilter === filter? 'active' : ''} onClick={() => setLinkFilter(filter)}>{filter}</button>)}</div></div><div className="table-scroll"><table><thead><tr><th>Short Link</th><th>Original URL</th><th>Clicks</th><th>Created</th><th>Expiry</th><th>Status</th><th>Actions</th></tr></thead><tbody>{filteredLinks.length > 0? filteredLinks.map((link) => <tr key={link.id}><td><strong className="short-link-cell">{link.shortUrl.replace('http://localhost:5000/', 'short.ly/')}</strong></td><td className="url-cell">{link.longUrl}</td><td>{link.clickCount}</td><td>{new Date(link.createdAt).toLocaleDateString()}</td><td>{link.expiresAt? new Date(link.expiresAt).toLocaleDateString() : 'Never'}</td><td><span className={`status-pill ${link.status.toLowerCase().replace(/\s+/g, '-')}`}>{link.status}</span></td><td><div className="row-actions"><button type="button" className="icon-action" onClick={() => copyLink(link.shortUrl)} aria-label="Copy short link"><Copy size={15} /></button><button type="button" className="icon-action" onClick={() => setQrLink(link.shortUrl)} aria-label={`Show QR code for ${link.shortCode}`}><QrCode size={15} /></button><button type="button" className="icon-action danger" onClick={() => deleteLink(link.id)} aria-label="Delete link"><Trash2 size={15} /></button></div></td></tr>) : <tr><td colSpan={7} className="empty-state">No links match this filter yet.</td></tr>}</tbody></table></div></section>
+        <section className="stats-grid compact-stats"><article className="stat-card"><span>Total links</span><strong>{links.length}</strong><small>Across your workspace</small></article><article className="stat-card"><span>Active</span><strong>{links.filter((link) => getLinkStatus(link, currentTime) === 'Active').length}</strong><small>Ready to share</small></article><article className="stat-card"><span>Expired</span><strong>{links.filter((link) => getLinkStatus(link, currentTime) === 'Expired').length}</strong><small>Need attention</small></article></section>
+        <section className="panel links-library"><div className="library-toolbar"><label className="search-field"><Search size={17} /><input placeholder="Search links..." value={linkSearch} onChange={(event) => setLinkSearch(event.target.value)} /></label><div className="filter-tabs">{(['All', 'Active', 'Expired'] as const).map((filter) => <button key={filter} type="button" className={linkFilter === filter? 'active' : ''} onClick={() => setLinkFilter(filter)}>{filter}</button>)}</div></div><div className="table-scroll"><table><thead><tr><th>Short Link</th><th>Original URL</th><th>Clicks</th><th>Created</th><th>Expiry</th><th>Status</th><th>Actions</th></tr></thead><tbody>{filteredLinks.length > 0? filteredLinks.map((link) => { const status = getLinkStatus(link, currentTime); return <tr key={link.id}><td><strong className="short-link-cell">{link.shortUrl.replace('http://localhost:5000/', 'short.ly/')}</strong></td><td className="url-cell">{link.longUrl}</td><td>{link.clickCount}</td><td>{new Date(link.createdAt).toLocaleDateString()}</td><td>{link.expiresAt? new Date(link.expiresAt).toLocaleDateString() : 'Never'}</td><td><span className={`status-pill ${status.toLowerCase().replace(/\s+/g, '-')}`}>{status}</span></td><td><div className="row-actions"><button type="button" className="icon-action" onClick={() => copyLink(link.shortUrl)} aria-label="Copy short link"><Copy size={15} /></button><button type="button" className="icon-action" onClick={() => setQrLink(link.shortUrl)} aria-label={`Show QR code for ${link.shortCode}`}><QrCode size={15} /></button><button type="button" className="icon-action danger" onClick={() => deleteLink(link.id)} aria-label="Delete link"><Trash2 size={15} /></button></div></td></tr> }) : <tr><td colSpan={7} className="empty-state">No links match this filter yet.</td></tr>}</tbody></table></div></section>
       </>
     }
 
@@ -1160,8 +1180,8 @@ function App() {
                   </td>
                   <td>{link.shortUrl}</td>
                   <td>
-                    <span className={`status-pill ${link.status.toLowerCase().replace(/\s+/g, '-')}`}>
-                      {link.status}
+                    <span className={`status-pill ${getLinkStatus(link, currentTime).toLowerCase().replace(/\s+/g, '-')}`}>
+                      {getLinkStatus(link, currentTime)}
                     </span>
                   </td>
                   <td>{link.clickCount}</td>

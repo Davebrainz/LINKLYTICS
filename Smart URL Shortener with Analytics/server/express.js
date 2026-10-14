@@ -186,7 +186,7 @@ const formatLinkForClient = (link, clickList = []) => ({
   expiresAt: link.expiresAt,
   maxClicks: link.maxClicks,
   clickCount: clickList.length,
-  status: link.status || 'Active',
+  status: link.expiresAt && new Date(link.expiresAt).getTime() <= Date.now() ? 'Expired' : link.status || 'Active',
   clickEvents: clickList.map((event) => ({
     id: event._id ? String(event._id) : event.id,
     country: event.country || 'Unknown',
@@ -463,7 +463,7 @@ app.get('/:slug', async (req, res) => {
     }
 
     const now = new Date();
-    if (link.expiresAt && new Date(link.expiresAt) < now) {
+    if (link.expiresAt && new Date(link.expiresAt) <= now) {
       return res.status(410).json({ message: 'This link has expired' });
     }
 

@@ -112,7 +112,7 @@ function formatLink(link, clickList = []) {
     expiresAt: link.expiresAt,
     maxClicks: link.maxClicks,
     clickCount: clickList.length,
-    status: link.status || 'Active',
+    status: link.expiresAt && new Date(link.expiresAt).getTime() <= Date.now() ? 'Expired' : link.status || 'Active',
     clickEvents: clickList.map((event) => ({
       id: event._id ? String(event._id) : event.id,
       country: event.country || 'Unknown',
@@ -317,7 +317,7 @@ export async function redirectShortLink(request, { params }) {
       ? await Link.findOne({ $or: [{ shortCode: slug.toUpperCase() }, { customSlug: slug.toLowerCase() }] })
       : state.links.find((item) => item.customSlug === slug.toLowerCase() || item.shortCode.toLowerCase() === slug.toLowerCase());
     if (!link) return json({ message: 'Short link not found' }, 404);
-    if (link.expiresAt && new Date(link.expiresAt) < new Date()) return json({ message: 'This link has expired' }, 410);
+    if (link.expiresAt && new Date(link.expiresAt) <= new Date()) return json({ message: 'This link has expired' }, 410);
     if (link.maxClicks && link.clickCount >= link.maxClicks) return json({ message: 'Click limit reached' }, 410);
     const address = getClientIpAddress(request.headers, '127.0.0.1');
     const location = getVisitorLocation(address);
