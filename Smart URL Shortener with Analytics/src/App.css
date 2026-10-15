@@ -1140,6 +1140,30 @@ tr.selected {
   border-radius: inherit;
 }
 
+.referrer-share span {
+  background: linear-gradient(90deg, #7c3aed, #4f46e5);
+}
+
+.referrer-share-cell {
+  min-width: 120px;
+}
+
+.referrer-share-cell > strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #334155;
+  font-size: 12px;
+}
+
+.referrer-share {
+  margin-top: 0;
+}
+
+.referrer-empty {
+  color: #64748b;
+  text-align: center;
+}
+
 .campaign-card > small {
   display: block;
   margin-top: 8px;
@@ -1467,6 +1491,7 @@ html.dark-mode body {
 .dark-mode .topbar h1,
 .dark-mode .panel-header h3,
 .dark-mode .stat-card strong,
+.dark-mode .referrer-share-cell > strong,
 .dark-mode .table-link,
 .dark-mode .link-preview p,
 .dark-mode .link-preview strong {
