@@ -389,6 +389,7 @@ function App() {
   const handleAuthSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setAuthNotice(null)
+    setIsLoading(true)
 
     try {
       const endpoint = authMode === 'register'? 'register' : 'login'
@@ -413,7 +414,6 @@ function App() {
       })
       setToken(data.token)
       setActivePage('dashboard')
-      setIsLoading(true)
       await fetchLinks(data.token)
       await fetchAnalytics(data.token)
       setScreen('dashboard')
@@ -870,10 +870,6 @@ function App() {
     return <><div className="page-heading"><div><p className="eyebrow">Workspace controls</p><h2>Settings</h2><p>Keep your profile, brand, and link defaults in sync.</p></div></div><section className="panel settings-panel"><div className="settings-tabs">{(['Profile', 'Branding', 'Preferences'] as const).map((tab) => <button key={tab} type="button" className={settingsTab === tab? 'active' : ''} onClick={() => setSettingsTab(tab)}>{tab}</button>)}</div><div className="settings-content">{settingsTab === 'Profile'? <ProfileSettings profile={profile} onUpdate={updateProfile} /> : null}{settingsTab === 'Branding'? <div className="settings-form"><label>Default domain<select value={settings.domain} onChange={(event) => setSettings((current) => ({...current, domain: event.target.value }))}><option>short.ly/</option><option>links.linklytics.com/</option></select></label><label>Theme color<div className="color-setting"><input type="color" value={settings.theme} onChange={(event) => setSettings((current) => ({...current, theme: event.target.value }))} /><span>{settings.theme}</span></div></label><button type="button" className="primary-button">Save branding</button></div> : null}{settingsTab === 'Preferences'? <div className="settings-form"><label>Default expiry time<select value={settings.expiry} onChange={(event) => setSettings((current) => ({...current, expiry: event.target.value }))}><option>7 days</option><option>30 days</option><option>90 days</option><option>Never</option></select></label><label>Default max clicks<select value={settings.maxClicks} onChange={(event) => setSettings((current) => ({...current, maxClicks: event.target.value }))}><option>Unlimited</option><option>100 clicks</option><option>1,000 clicks</option></select></label><label className="checkbox-row"><input type="checkbox" checked={settings.emailAlerts} onChange={(event) => setSettings((current) => ({...current, emailAlerts: event.target.checked }))} /> Enable email alert when link expires</label><button type="button" className="primary-button">Save preferences</button></div> : null}</div></section></>
   }
 
-  if (isLoading) {
-    return <div className="loading-state">Loading dashboard...</div>
-  }
-
   if (screen === 'landing') {
     return (
       <div className="marketing-page">
@@ -927,7 +923,7 @@ function App() {
         <header className="auth-nav"><button type="button" className="back-button" onClick={() => setScreen('landing')}>← Back to home</button>{themeButton}</header>
         <main className="auth-layout">
           <section className="auth-intro"><Logo size={42} showText={true} /><p className="eyebrow">Your link workspace</p><h1>Make every share more measurable.</h1><p>Join Linklytics to create smarter short links and see the story behind every click.</p><div className="auth-benefit">✓ Unlimited campaign organization</div><div className="auth-benefit">✓ Fast, clear audience analytics</div></section>
-          <form className="auth-card" onSubmit={handleAuthSubmit}><div className="auth-card-header"><p className="eyebrow">Welcome to Linklytics</p><h2>{authMode === 'login'? 'Log in to your workspace' : 'Create your account'}</h2><p>{authMode === 'login'? 'Pick up where your campaigns left off.' : 'Start building smarter links in minutes.'}</p></div>{authMode === 'register'? <label>Full name<input required value={authForm.name} onChange={(event) => setAuthForm((current) => ({...current, name: event.target.value }))} placeholder="Ada Lovelace" /></label> : null}<label>Email address<input required type="email" value={authForm.email} onChange={(event) => setAuthForm((current) => ({...current, email: event.target.value }))} placeholder="you@company.com" /></label><label>Password<input required minLength={6} type="password" value={authForm.password} onChange={(event) => setAuthForm((current) => ({...current, password: event.target.value }))} placeholder="At least 6 characters" /></label>{authNotice? <div className={`notice ${authNotice.type}`}>{authNotice.text}</div> : null}<button type="submit" className="primary-button full-width">{authMode === 'login'? 'Log in' : 'Create account'}</button><p className="auth-switch">{authMode === 'login'? 'New to Linklytics?' : 'Already have an account?'} <button type="button" onClick={() => { setAuthMode(authMode === 'login'? 'register' : 'login'); setAuthNotice(null) }}>{authMode === 'login'? 'Create an account' : 'Log in instead'}</button></p></form>
+          <form className="auth-card" onSubmit={handleAuthSubmit}><div className="auth-card-header"><p className="eyebrow">Welcome to Linklytics</p><h2>{authMode === 'login'? 'Log in to your workspace' : 'Create your account'}</h2><p>{authMode === 'login'? 'Pick up where your campaigns left off.' : 'Start building smarter links in minutes.'}</p></div>{authMode === 'register'? <label>Full name<input required value={authForm.name} onChange={(event) => setAuthForm((current) => ({...current, name: event.target.value }))} placeholder="Ada Lovelace" /></label> : null}<label>Email address<input required type="email" value={authForm.email} onChange={(event) => setAuthForm((current) => ({...current, email: event.target.value }))} placeholder="you@company.com" /></label><label>Password<input required minLength={6} type="password" value={authForm.password} onChange={(event) => setAuthForm((current) => ({...current, password: event.target.value }))} placeholder="At least 6 characters" /></label>{authNotice? <div className={`notice ${authNotice.type}`}>{authNotice.text}</div> : null}<button type="submit" className="primary-button full-width" disabled={isLoading}>{isLoading? 'Please wait...' : authMode === 'login'? 'Log in' : 'Create account'}</button><p className="auth-switch">{authMode === 'login'? 'New to Linklytics?' : 'Already have an account?'} <button type="button" onClick={() => { setAuthMode(authMode === 'login'? 'register' : 'login'); setAuthNotice(null) }}>{authMode === 'login'? 'Create an account' : 'Log in instead'}</button></p></form>
         </main>
       </div>
     )
